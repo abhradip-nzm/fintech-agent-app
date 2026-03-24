@@ -190,7 +190,7 @@ const Dashboard = () => {
             <div style={{ display: 'flex', alignItems: 'center', gap: '10px', marginBottom: '12px' }}>
               <span style={{ fontSize: '24px' }}>📱</span>
               <div>
-                <h4 style={{ fontFamily: 'var(--font-display)', fontWeight: 700, fontSize: '13px', color: '#065f46' }}>WhatsApp Channel · CallMeBot API</h4>
+                <h4 style={{ fontFamily: 'var(--font-display)', fontWeight: 700, fontSize: '13px', color: '#065f46' }}>WhatsApp Channel · Whapi.Cloud</h4>
                 <p style={{ fontSize: '11px', color: '#16a34a' }}>Connected & Active</p>
               </div>
             </div>

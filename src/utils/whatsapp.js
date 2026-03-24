@@ -1,94 +1,107 @@
-// WhatsApp Integration Utility
-// Using CallMeBot free WhatsApp API for simulation
-// Free tier: https://www.callmebot.com/blog/free-api-whatsapp-messages/
-// Setup: User needs to add +34 644 59 86 74 to contacts and send "I allow callmebot to send me messages"
+// WhatsApp Integration — Whapi.Cloud
+// Free tier: 150 msgs/day · No credit card needed
+// Docs: https://whapi.cloud/docs
 
-const CALLMEBOT_API = 'https://api.callmebot.com/whatsapp.php';
-
-// Demo phone number (from requirements)
-const DEMO_PHONE = '918617269309';
-const DEMO_APIKEY = 'YOUR_CALLMEBOT_APIKEY'; // User needs to get this from CallMeBot
+const WHAPI_BASE  = 'https://gate.whapi.cloud';
+const WHAPI_API   = `${WHAPI_BASE}/messages/text`;
+const WHAPI_TOKEN = 'XfKaJqDlYaChylDuIiMDbrKgMBV8KjaB';
 
 /**
- * Send a WhatsApp message via CallMeBot API (free)
- * Setup instructions:
- * 1. Save +34 644 59 86 74 in your phone contacts as "CallMeBot"
- * 2. Send "I allow callmebot to send me messages" to that number via WhatsApp
- * 3. You'll receive an API key
- * 4. Replace DEMO_APIKEY with your received key
+ * Send a WhatsApp text message via Whapi.Cloud
+ * @param {string} phone   – recipient with country code, e.g. "+918617269309"
+ * @param {string} message – plain-text body
  */
-export const sendWhatsAppMessage = async (phone, message, apiKey = DEMO_APIKEY) => {
+export const sendWhatsAppMessage = async (phone, message) => {
   try {
+    // Whapi wants digits only — no "+" prefix
     const cleanPhone = phone.replace(/\D/g, '');
-    const encodedMessage = encodeURIComponent(message);
-    
-    // CallMeBot API endpoint
-    const url = `${CALLMEBOT_API}?phone=${cleanPhone}&text=${encodedMessage}&apikey=${apiKey}`;
-    
-    // In production, make this server-side to protect API key
-    const response = await fetch(url, { method: 'GET', mode: 'no-cors' });
-    
-    console.log(`[WhatsApp] Message sent to ${cleanPhone}: ${message.substring(0, 50)}...`);
-    return { success: true, phone: cleanPhone };
-  } catch (error) {
-    console.error('[WhatsApp] Send failed:', error);
-    return { success: false, error: error.message };
+
+    const response = await fetch(WHAPI_API, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${WHAPI_TOKEN}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ to: cleanPhone, body: message }),
+    });
+
+    const data = await response.json();
+
+    if (response.ok) {
+      console.log(`[WhatsApp] ✓ Sent to ${cleanPhone}`, data);
+      return { success: true, phone: cleanPhone, messageId: data.id };
+    } else {
+      console.error('[WhatsApp] API error:', data);
+      return { success: false, error: data?.message || 'Unknown error' };
+    }
+  } catch (err) {
+    console.error('[WhatsApp] Network error:', err);
+    return { success: false, error: err.message };
   }
 };
 
-/**
- * Format a customer issue notification message
- */
-export const formatIssueNotification = (customer, issue) => {
-  return `🔔 *FinAgent Support*\n\nHello ${customer.name}! We noticed you might need help with: *${issue.title}*\n\nOur AI assistant is here to help you 24/7. Please reply to this message and we'll resolve your issue immediately.\n\n_FinAgent Intelligent Finance_ ✨`;
-};
+/** Format an AI bot message for WhatsApp delivery */
+export const formatBotMessage = (message) =>
+  `🤖 *FinAgent AI Bot*\n\n${message}\n\n_Powered by AI | Reply anytime for instant support_`;
+
+/** Format a human-agent message for WhatsApp delivery */
+export const formatAgentTakeover = (agentName, message) =>
+  `👤 *${agentName} (Human Agent)*\n\n${message}\n\n_FinAgent Premium Support_`;
+
+/** Format an initial issue-notification message */
+export const formatIssueNotification = (customer, issue) =>
+  `🔔 *FinAgent Support*\n\nHello ${customer.name}! We noticed you need help with: *${issue.title}*\n\nOur AI assistant is here 24/7 — just reply and we'll resolve your issue immediately.\n\n_FinAgent Intelligent Finance_ ✨`;
+
+/** Simulate an incoming WhatsApp message (used for demo) */
+export const simulateIncomingMessage = (phone, message) => ({
+  from: phone,
+  message,
+  timestamp: new Date().toISOString(),
+  type: 'text',
+  source: 'whatsapp',
+});
 
 /**
- * Format an AI bot response message
+ * Fetch incoming messages (replies) from a customer's WhatsApp number via Whapi.Cloud
+ * @param {string} phone  – customer phone, e.g. "+918617269309"
+ * @param {number} count  – how many recent messages to fetch (default 30)
+ * Returns: { success, messages: [{ id, message, timestamp }], error? }
  */
-export const formatBotMessage = (message) => {
-  return `🤖 *FinAgent AI Bot*\n\n${message}\n\n_Powered by AI | Reply anytime for instant support_`;
-};
+export const fetchIncomingMessages = async (phone, count = 30) => {
+  try {
+    const cleanPhone = phone.replace(/\D/g, '');
+    // Whapi chat ID format: {digits}@s.whatsapp.net
+    const chatId = `${cleanPhone}@s.whatsapp.net`;
+    const url = `${WHAPI_BASE}/messages/list/${encodeURIComponent(chatId)}?count=${count}&offset=0`;
 
-/**
- * Format a human agent takeover message
- */
-export const formatAgentTakeover = (agentName, message) => {
-  return `👤 *${agentName} (Human Agent)*\n\n${message}\n\n_FinAgent Premium Support_`;
-};
+    const response = await fetch(url, {
+      headers: {
+        'Authorization': `Bearer ${WHAPI_TOKEN}`,
+        'Content-Type': 'application/json',
+      },
+    });
 
-/**
- * Simulate WhatsApp webhook incoming message
- * In production, this would be handled by a real webhook from WhatsApp Business API
- */
-export const simulateIncomingMessage = (phone, message) => {
-  return {
-    from: phone,
-    message: message,
-    timestamp: new Date().toISOString(),
-    type: 'text',
-    source: 'whatsapp'
-  };
-};
+    if (!response.ok) {
+      const err = await response.json().catch(() => ({}));
+      return { success: false, messages: [], error: err?.message || `HTTP ${response.status}` };
+    }
 
-// WhatsApp API Integration Notes for Developer:
-// 
-// FREE OPTIONS:
-// 1. CallMeBot (Recommended for demo):
-//    - Free, no server needed
-//    - Setup: https://www.callmebot.com/blog/free-api-whatsapp-messages/
-//    - Limitation: One-way (send only), 50 msgs/day
-//
-// 2. UltraMsg (Free trial):
-//    - Free trial with 100 msgs
-//    - Two-way messaging
-//    - https://ultramsg.com/
-//
-// 3. Fonnte (Free tier):
-//    - Free tier available
-//    - https://fonnte.com/
-//
-// For production, use:
-// - WhatsApp Business API (Meta)
-// - Twilio WhatsApp API
-// - 360dialog
+    const data = await response.json();
+    // Filter only messages FROM the customer (not sent by us)
+    const incoming = (data.messages || [])
+      .filter(m => m.from_me === false && (m.type === 'text' || m.text))
+      .map(m => ({
+        id: m.id,
+        message: m.body || m.text?.body || m.text || '',
+        timestamp: m.timestamp ? new Date(m.timestamp * 1000).toISOString() : new Date().toISOString(),
+        from: m.from,
+      }))
+      .filter(m => m.message.trim());
+
+    console.log(`[WhatsApp] Fetched ${incoming.length} incoming messages for ${cleanPhone}`);
+    return { success: true, messages: incoming };
+  } catch (err) {
+    console.error('[WhatsApp] fetchIncomingMessages error:', err);
+    return { success: false, messages: [], error: err.message };
+  }
+};

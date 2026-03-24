@@ -167,6 +167,40 @@ export const customers = [
     ]
   },
   {
+    id: 'cust_007',
+    name: 'Abhradip Ghosh',
+    phone: '+91 8617269309',
+    whatsapp: '+918617269309',
+    email: 'abhradip.ghosh@email.com',
+    avatar: 'AG',
+    avatarColor: '#0f766e',
+    accountNumber: 'FIN-2024-007',
+    balance: 4200.00,
+    joinDate: '2024-06-12',
+    tier: 'Silver',
+    status: 'at_risk',
+    kycStatus: 'verified',
+    issues: [
+      {
+        id: 'issue_007',
+        type: 'wallet_topup',
+        title: 'Wallet Top-up Failed',
+        description: 'Customer attempted to add ₹1,500 to wallet via UPI but money was debited from bank and wallet balance was not updated.',
+        severity: 'high',
+        status: 'open',
+        createdAt: '2026-03-24T09:15:00',
+        lastActivity: '2026-03-24T09:15:00',
+        assignedTo: 'ai_bot',
+        category: 'Wallet Issues'
+      }
+    ],
+    transactions: [
+      { id: 'txn_020', type: 'debit', amount: 1500, description: 'Wallet Top-up (Failed)', date: '2026-03-24', status: 'failed' },
+      { id: 'txn_021', type: 'credit', amount: 5000, description: 'Salary Credit', date: '2026-03-01', status: 'success' },
+      { id: 'txn_022', type: 'debit', amount: 800, description: 'Mobile Recharge', date: '2026-03-10', status: 'success' },
+    ]
+  },
+  {
     id: 'cust_006',
     name: 'Anjali Reddy',
     phone: '+91 4321098765',
