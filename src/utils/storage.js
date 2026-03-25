@@ -11,10 +11,25 @@
 // Without a key: data persists in localStorage (browser-only).
 // ─────────────────────────────────────────────────────────────────────────────
 
-const JSONBIN_API = 'https://api.jsonbin.io/v3';
-const LS_AGENTS   = 'agently_agents_v1';
-const LS_BIN_ID   = 'agently_bin_id';
-const LS_API_KEY  = 'agently_jsonbin_key';
+const JSONBIN_API    = 'https://api.jsonbin.io/v3';
+const LS_AGENTS      = 'agently_agents_v1';
+const LS_BIN_ID      = 'agently_bin_id';
+const LS_API_KEY     = 'agently_jsonbin_key';
+const LS_INDUSTRIES  = 'agently_industries_v1';
+
+// ─── Default industries ───────────────────────────────────────────────────────
+export const DEFAULT_INDUSTRIES = [
+  { id: 'ind_fintech',       name: 'FinTech' },
+  { id: 'ind_banking',       name: 'Banking' },
+  { id: 'ind_healthcare',    name: 'Healthcare' },
+  { id: 'ind_insurance',     name: 'Insurance' },
+  { id: 'ind_ecommerce',     name: 'E-Commerce' },
+  { id: 'ind_retail',        name: 'Retail' },
+  { id: 'ind_logistics',     name: 'Logistics' },
+  { id: 'ind_education',     name: 'Education' },
+  { id: 'ind_realestate',    name: 'Real Estate' },
+  { id: 'ind_manufacturing', name: 'Manufacturing' },
+];
 
 // ─── Default seed data ───────────────────────────────────────────────────────
 export const DEFAULT_AGENTS = [
@@ -87,6 +102,20 @@ export const readAgents = async () => {
   }
 
   return _readLocal() ?? DEFAULT_AGENTS;
+};
+
+// ─── Industries helpers ───────────────────────────────────────────────────────
+/** Read industries from localStorage; returns DEFAULT_INDUSTRIES if none saved. */
+export const readIndustries = () => {
+  try {
+    const r = localStorage.getItem(LS_INDUSTRIES);
+    return r ? JSON.parse(r) : DEFAULT_INDUSTRIES;
+  } catch { return DEFAULT_INDUSTRIES; }
+};
+
+/** Write industries to localStorage. */
+export const writeIndustries = (industries) => {
+  localStorage.setItem(LS_INDUSTRIES, JSON.stringify(industries));
 };
 
 /**

@@ -10,6 +10,7 @@ import ChatList from './pages/engagement/chat/ChatList';
 import ChatPage from './pages/engagement/chat/ChatPage';
 import AgentsPage from './pages/engagement/agents/AgentsPage';
 import NotificationsPage from './pages/notifications/NotificationsPage';
+import AgentDetailPage from './pages/home/AgentDetailPage';
 
 function App() {
   return (
@@ -29,6 +30,9 @@ function App() {
           <Route path="/engagement/chat" element={<ChatList />} />
           <Route path="/engagement/chat/:customerId" element={<ChatPage />} />
           <Route path="/engagement/agents" element={<AgentsPage />} />
+
+          {/* Agent Detail */}
+          <Route path="/agent/:agentId" element={<AgentDetailPage />} />
 
           {/* Notifications */}
           <Route path="/notifications" element={<NotificationsPage />} />

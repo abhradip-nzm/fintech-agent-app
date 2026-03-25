@@ -1,0 +1,139 @@
+/* ── Agent Detail Page ──────────────────────────────────────────────────────── */
+.adp-root {
+  min-height: 100vh;
+  font-family: 'Inter', sans-serif;
+  position: relative;
+  overflow-x: hidden;
+}
+
+.adp-back-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 8px 16px;
+  border-radius: 20px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  border: none;
+  font-family: 'Inter', sans-serif;
+  transition: all 0.18s;
+  text-decoration: none;
+}
+
+/* ── Rich content prose styles ─────────────────────────────────────────────── */
+.adp-rich-content {
+  font-family: 'Inter', sans-serif;
+  font-size: 15px;
+  line-height: 1.85;
+  color: #1e293b;
+}
+
+.adp-rich-content h1,
+.adp-rich-content h2 {
+  font-family: 'Plus Jakarta Sans', sans-serif;
+  font-size: 22px;
+  font-weight: 700;
+  color: #0f172a;
+  margin: 28px 0 12px;
+  line-height: 1.3;
+  letter-spacing: -0.01em;
+}
+
+.adp-rich-content h3 {
+  font-family: 'Plus Jakarta Sans', sans-serif;
+  font-size: 17px;
+  font-weight: 700;
+  color: #1e293b;
+  margin: 22px 0 10px;
+  line-height: 1.4;
+}
+
+.adp-rich-content p {
+  margin: 0 0 14px;
+  color: #374151;
+}
+
+.adp-rich-content ul,
+.adp-rich-content ol {
+  padding-left: 22px;
+  margin: 0 0 16px;
+}
+
+.adp-rich-content ul li,
+.adp-rich-content ol li {
+  margin-bottom: 6px;
+  color: #374151;
+  line-height: 1.7;
+}
+
+.adp-rich-content ul li::marker {
+  color: var(--adp-accent, #1e5fb5);
+}
+
+.adp-rich-content ol li::marker {
+  color: var(--adp-accent, #1e5fb5);
+  font-weight: 700;
+}
+
+.adp-rich-content blockquote {
+  border-left: 4px solid var(--adp-accent, #1e5fb5);
+  padding: 12px 20px;
+  margin: 20px 0;
+  background: var(--adp-accent-bg, rgba(30,95,181,0.05));
+  border-radius: 0 10px 10px 0;
+  font-style: italic;
+  color: #475569;
+}
+
+.adp-rich-content hr {
+  border: none;
+  border-top: 1px solid rgba(0,0,0,0.1);
+  margin: 28px 0;
+}
+
+.adp-rich-content a {
+  color: var(--adp-accent, #1e5fb5);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  font-weight: 500;
+}
+
+.adp-rich-content a:hover {
+  opacity: 0.8;
+}
+
+.adp-rich-content b,
+.adp-rich-content strong {
+  font-weight: 700;
+  color: #0f172a;
+}
+
+.adp-rich-content em {
+  font-style: italic;
+  color: #475569;
+}
+
+.adp-rich-content u {
+  text-underline-offset: 3px;
+}
+
+/* First heading shouldn't have extra top margin */
+.adp-rich-content > h1:first-child,
+.adp-rich-content > h2:first-child,
+.adp-rich-content > h3:first-child {
+  margin-top: 0;
+}
+
+/* Last paragraph no extra bottom margin */
+.adp-rich-content > *:last-child {
+  margin-bottom: 0;
+}
+
+/* ── Responsive ─────────────────────────────────────────────────────────────── */
+@media (max-width: 768px) {
+  .adp-rich-content h1,
+  .adp-rich-content h2 { font-size: 19px; }
+  .adp-rich-content h3 { font-size: 16px; }
+  .adp-rich-content { font-size: 14px; }
+}
