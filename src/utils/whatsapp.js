@@ -2,9 +2,10 @@
 // Free tier: 150 msgs/day · No credit card needed
 // Docs: https://whapi.cloud/docs
 
-const WHAPI_BASE  = 'https://gate.whapi.cloud';
-const WHAPI_API   = `${WHAPI_BASE}/messages/text`;
-const WHAPI_TOKEN = 'XfKaJqDlYaChylDuIiMDbrKgMBV8KjaB';
+import { readWhapiToken } from './storage';
+
+const WHAPI_BASE = 'https://gate.whapi.cloud';
+const WHAPI_API  = `${WHAPI_BASE}/messages/text`;
 
 /**
  * Send a WhatsApp text message via Whapi.Cloud
@@ -15,11 +16,12 @@ export const sendWhatsAppMessage = async (phone, message) => {
   try {
     // Whapi wants digits only — no "+" prefix
     const cleanPhone = phone.replace(/\D/g, '');
+    const token = readWhapiToken();
 
     const response = await fetch(WHAPI_API, {
       method: 'POST',
       headers: {
-        'Authorization': `Bearer ${WHAPI_TOKEN}`,
+        'Authorization': `Bearer ${token}`,
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({ to: cleanPhone, body: message }),
@@ -73,10 +75,11 @@ export const fetchIncomingMessages = async (phone, count = 30) => {
     // Whapi chat ID format: {digits}@s.whatsapp.net
     const chatId = `${cleanPhone}@s.whatsapp.net`;
     const url = `${WHAPI_BASE}/messages/list/${encodeURIComponent(chatId)}?count=${count}&offset=0`;
+    const token = readWhapiToken();
 
     const response = await fetch(url, {
       headers: {
-        'Authorization': `Bearer ${WHAPI_TOKEN}`,
+        'Authorization': `Bearer ${token}`,
         'Content-Type': 'application/json',
       },
     });

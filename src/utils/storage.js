@@ -16,6 +16,17 @@ const LS_AGENTS      = 'agently_agents_v1';
 const LS_BIN_ID      = 'agently_bin_id';
 const LS_API_KEY     = 'agently_jsonbin_key';
 const LS_INDUSTRIES  = 'agently_industries_v1';
+const LS_WHAPI_TOKEN = 'agently_whapi_token';
+
+const DEFAULT_WHAPI_TOKEN = 'XfKaJqDlYaChylDuIiMDbrKgMBV8KjaB';
+
+/** Read the Whapi API token — falls back to the factory default. */
+export const readWhapiToken = () =>
+  localStorage.getItem(LS_WHAPI_TOKEN) || DEFAULT_WHAPI_TOKEN;
+
+/** Persist an updated Whapi API token. */
+export const writeWhapiToken = (token) =>
+  localStorage.setItem(LS_WHAPI_TOKEN, token.trim());
 
 // ─── Default industries ───────────────────────────────────────────────────────
 export const DEFAULT_INDUSTRIES = [

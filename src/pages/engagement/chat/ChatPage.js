@@ -4,6 +4,7 @@ import Sidebar from '../../../components/Sidebar';
 import { useApp } from '../../../context/AppContext';
 import { sendWhatsAppMessage, formatBotMessage, formatAgentTakeover, fetchIncomingMessages } from '../../../utils/whatsapp';
 import { processTriageMessage, getTriageOpener, getCustomerIssueType } from '../../../utils/triage';
+import { SUPPORTED_LANGUAGES } from '../../../utils/languages';
 import { playMessageTone, playAssignTone } from '../../../utils/sounds';
 import { STATUS_META } from '../../../data/agentsData';
 
@@ -237,14 +238,19 @@ const ChatPage = () => {
     setBotTyping(true);
     setTimeout(() => {
       setBotTyping(false);
-      const result = processTriageMessage(triageState.issueType, triageState.state, customerMsg, { phone: customer?.phone });
+      const currentLang = triageState.language || 'en';
+      const result = processTriageMessage(triageState.issueType, triageState.state, customerMsg, { phone: customer?.phone }, currentLang);
       if (result.message) {
         sendMessage(customerId, result.message, 'ai_bot', 'Agently AI');
         // Deliver to WhatsApp (best effort)
         const ph = '+' + (customer?.phone || '').replace(/\D/g, '');
         sendWhatsAppMessage(ph, formatBotMessage(result.message)).catch(() => {});
       }
-      setTriageState(customerId, { issueType: triageState.issueType, state: result.nextState });
+      setTriageState(customerId, {
+        issueType: triageState.issueType,
+        state: result.nextState,
+        language: result.lang !== undefined ? result.lang : currentLang,
+      });
     }, 1600);
   }, [customerId, customer, getTriageState, sendMessage, setTriageState]);
 
@@ -279,14 +285,14 @@ const ChatPage = () => {
   const handleInitiateBot = async () => {
     if (!customer || initiating) return;
     setInitiating(true);
-    const { message, nextState } = getTriageOpener(issueType);
+    const { message, nextState } = getTriageOpener();
 
     setBotTyping(true);
     await new Promise(r => setTimeout(r, 1800));
     setBotTyping(false);
 
     sendMessage(customerId, message, 'ai_bot', 'Agently AI');
-    setTriageState(customerId, { issueType, state: nextState });
+    setTriageState(customerId, { issueType, state: nextState, language: null });
     setBotInitiated(true);
     setPolling(true);
 
@@ -330,12 +336,17 @@ const ChatPage = () => {
     if (!isHumanMode) {
       const triageState = getTriageState(customerId);
       if (triageState && triageState.state !== 'terminal') {
+        const currentLang = triageState.language || 'en';
         setBotTyping(true);
         setTimeout(() => {
           setBotTyping(false);
-          const result = processTriageMessage(triageState.issueType, triageState.state, msg, { phone: customer?.phone });
+          const result = processTriageMessage(triageState.issueType, triageState.state, msg, { phone: customer?.phone }, currentLang);
           sendMessage(customerId, result.message, 'ai_bot', 'Agently AI');
-          setTriageState(customerId, { issueType: triageState.issueType, state: result.nextState });
+          setTriageState(customerId, {
+            issueType: triageState.issueType,
+            state: result.nextState,
+            language: result.lang !== undefined ? result.lang : currentLang,
+          });
         }, 1600);
       }
     }
@@ -562,6 +573,18 @@ const ChatPage = () => {
                         TRIAGE: {getTriageState(customerId)?.state?.replace('_', ' ').toUpperCase()}
                       </span>
                     )}
+                    {(() => {
+                      const ts = getTriageState(customerId);
+                      const lang = ts?.language;
+                      if (!lang || isHumanMode) return null;
+                      const langMeta = SUPPORTED_LANGUAGES.find(l => l.code === lang);
+                      if (!langMeta) return null;
+                      return (
+                        <span style={{ marginLeft: 5, padding: '1px 6px', borderRadius: 6, background: '#f0fdf4', color: '#166534', fontSize: 9, fontWeight: 700, border: '1px solid #bbf7d0' }}>
+                          {langMeta.emoji} {langMeta.native}
+                        </span>
+                      );
+                    })()}
                   </span>
                 </div>
               </div>

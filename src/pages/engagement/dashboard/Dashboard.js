@@ -1,10 +1,11 @@
-import React from 'react';
+import React, { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, PieChart, Pie, Cell, Legend } from 'recharts';
 import Layout from '../../../components/Layout';
 import { StatCard, Card, Button, Badge } from '../../../components/UI';
 import { useApp } from '../../../context/AppContext';
 import { analyticsData, issueCategories, resolutionTrend } from '../../../data/mockData';
+import { readWhapiToken, writeWhapiToken } from '../../../utils/storage';
 
 const Dashboard = () => {
   const navigate = useNavigate();
@@ -13,6 +14,31 @@ const Dashboard = () => {
   const atRiskCustomers = customers.filter(c => c.status === 'at_risk');
 
   const COLORS = ['#ef4444', '#f59e0b', '#8b5cf6', '#3b82f6', '#10b981'];
+
+  // ── Whapi token settings state ──────────────────────────────────────────
+  const [tokenInput,    setTokenInput]    = useState(readWhapiToken());
+  const [showToken,     setShowToken]     = useState(false);
+  const [editingToken,  setEditingToken]  = useState(false);
+  const [tokenStatus,   setTokenStatus]   = useState(null); // { type: 'success'|'error', text }
+
+  const handleSaveToken = () => {
+    if (!tokenInput.trim()) return;
+    writeWhapiToken(tokenInput.trim());
+    setEditingToken(false);
+    setTokenStatus({ type: 'success', text: 'Token saved successfully ✓' });
+    setTimeout(() => setTokenStatus(null), 3000);
+  };
+
+  const handleCancelToken = () => {
+    setTokenInput(readWhapiToken());
+    setEditingToken(false);
+  };
+
+  const maskedToken = (t) => {
+    if (!t) return '—';
+    if (t.length <= 8) return '••••••••';
+    return t.slice(0, 4) + '••••••••••••' + t.slice(-4);
+  };
 
   return (
     <Layout
@@ -185,20 +211,77 @@ const Dashboard = () => {
             </div>
           </Card>
 
-          {/* WhatsApp integration status */}
-          <Card style={{ padding: '20px', background: 'linear-gradient(135deg, #f0fdf4, #dcfce7)', border: '1px solid #86efac' }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: '10px', marginBottom: '12px' }}>
-              <span style={{ fontSize: '24px' }}>📱</span>
-              <div>
-                <h4 style={{ fontFamily: 'var(--font-display)', fontWeight: 700, fontSize: '13px', color: '#065f46' }}>WhatsApp Channel · Whapi.Cloud</h4>
-                <p style={{ fontSize: '11px', color: '#16a34a' }}>Connected & Active</p>
+          {/* WhatsApp API token settings */}
+          <Card style={{ padding: '20px' }}>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '14px' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                <span style={{ fontSize: '22px' }}>📱</span>
+                <div>
+                  <h4 style={{ fontFamily: 'var(--font-display)', fontWeight: 700, fontSize: '13px', color: 'var(--gray-900)' }}>WhatsApp · Whapi.Cloud</h4>
+                  <p style={{ fontSize: '11px', color: 'var(--gray-400)', marginTop: '1px' }}>API Token Settings</p>
+                </div>
               </div>
+              {!editingToken && (
+                <button
+                  onClick={() => { setEditingToken(true); setTokenInput(readWhapiToken()); }}
+                  style={{ padding: '5px 12px', borderRadius: '8px', fontSize: '11px', fontWeight: 600, background: '#eff6ff', color: '#1e5fb5', border: '1px solid #bfdbfe', cursor: 'pointer', fontFamily: 'var(--font-body)' }}
+                >
+                  Edit Token
+                </button>
+              )}
             </div>
-            <div style={{ display: 'flex', gap: '16px', fontSize: '12px', color: '#166534' }}>
-              <div><strong>23</strong><br /><span style={{ color: '#16a34a', fontSize: '10px' }}>Msgs Today</span></div>
-              <div><strong>+91 8617269309</strong><br /><span style={{ color: '#16a34a', fontSize: '10px' }}>Demo Number</span></div>
-              <div><strong>Free Tier</strong><br /><span style={{ color: '#16a34a', fontSize: '10px' }}>API Plan</span></div>
-            </div>
+
+            {/* Token display / edit */}
+            {!editingToken ? (
+              <div style={{ display: 'flex', alignItems: 'center', gap: '8px', padding: '10px 12px', background: 'var(--gray-50)', borderRadius: '8px', border: '1px solid var(--gray-100)' }}>
+                <span style={{ flex: 1, fontSize: '12px', fontFamily: 'monospace', color: 'var(--gray-700)', letterSpacing: showToken ? 0 : '0.05em', wordBreak: 'break-all' }}>
+                  {showToken ? readWhapiToken() : maskedToken(readWhapiToken())}
+                </span>
+                <button
+                  onClick={() => setShowToken(v => !v)}
+                  title={showToken ? 'Hide token' : 'Show token'}
+                  style={{ flexShrink: 0, background: 'none', border: 'none', cursor: 'pointer', color: 'var(--gray-400)', fontSize: '14px', padding: '2px 4px' }}
+                >
+                  {showToken ? '🙈' : '👁️'}
+                </button>
+              </div>
+            ) : (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                <input
+                  type="text"
+                  value={tokenInput}
+                  onChange={e => setTokenInput(e.target.value)}
+                  placeholder="Paste your Whapi.Cloud API token"
+                  style={{ width: '100%', padding: '9px 12px', borderRadius: '8px', border: '1.5px solid #bfdbfe', fontSize: '12px', fontFamily: 'monospace', color: 'var(--gray-800)', outline: 'none', boxSizing: 'border-box', background: '#fff' }}
+                  autoFocus
+                />
+                <div style={{ display: 'flex', gap: '8px' }}>
+                  <button
+                    onClick={handleSaveToken}
+                    style={{ flex: 2, padding: '8px', borderRadius: '8px', background: 'linear-gradient(135deg, #1e5fb5, #2979d8)', color: '#fff', border: 'none', fontSize: '12px', fontWeight: 700, cursor: 'pointer', fontFamily: 'var(--font-body)' }}
+                  >
+                    Save Token
+                  </button>
+                  <button
+                    onClick={handleCancelToken}
+                    style={{ flex: 1, padding: '8px', borderRadius: '8px', background: '#f1f5f9', color: '#64748b', border: '1px solid #e2e8f0', fontSize: '12px', fontWeight: 600, cursor: 'pointer', fontFamily: 'var(--font-body)' }}
+                  >
+                    Cancel
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {/* Status feedback */}
+            {tokenStatus && (
+              <div style={{ marginTop: '8px', padding: '6px 10px', borderRadius: '6px', fontSize: '11px', fontWeight: 600, background: tokenStatus.type === 'success' ? '#d1fae5' : '#fee2e2', color: tokenStatus.type === 'success' ? '#065f46' : '#991b1b' }}>
+                {tokenStatus.text}
+              </div>
+            )}
+
+            <p style={{ marginTop: '10px', fontSize: '10px', color: 'var(--gray-400)', lineHeight: 1.5 }}>
+              Get your token from <strong>whapi.cloud</strong> dashboard. All WhatsApp messages in this app use this token.
+            </p>
           </Card>
         </div>
       </div>

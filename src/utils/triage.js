@@ -5,17 +5,39 @@
  *   - initial: opening question + nextState
  *   - states:  map of stateName → { detect(msg), onMatch, onNoMatch }
  *
- * processTriageMessage(issueType, currentState, customerMessage)
- *   → { message, nextState, isTerminal }
+ * processTriageMessage(issueType, currentState, customerMessage, ctx, lang)
+ *   → { message, nextState, isTerminal, lang? }
  */
+
+import {
+  LANGUAGE_SELECTION_MSG, LANG_REASK, LANG_CONFIRM,
+  detectLanguage, getTranslatedMessage,
+} from './languages';
 
 // ─── Detection helpers ─────────────────────────────────────────────────────
 const has = (msg, ...terms) => terms.some(t => msg.toLowerCase().includes(t));
-const matches = (msg, regex) => regex.test(msg.toLowerCase());
 const hasRef   = msg => /\b[A-Z0-9]{8,24}\b/.test(msg);
-const hasAmt   = msg => /₹?\s?\d[\d,]*/.test(msg);
-const isPositive = msg => has(msg, 'yes', 'sure', 'ok', 'please', 'yeah', 'send', 'correct', 'right', 'done', 'fixed', 'working', 'thank', 'solved', 'resolved', 'great');
-const isNegative = msg => has(msg, 'no', 'not', 'still', "doesn't", "didn't", "can't", 'cannot', 'nope', 'never');
+const hasAmt   = msg => /₹?\s?\d[\d,]*/.test(msg); // eslint-disable-line
+const isPositive = msg => has(msg,
+  // English
+  'yes', 'sure', 'ok', 'please', 'yeah', 'send', 'correct', 'right', 'done', 'fixed', 'working', 'thank', 'solved', 'resolved', 'great',
+  // Hindi
+  'हाँ', 'हां', 'ठीक', 'हो गया', 'सही', 'धन्यवाद', 'बढ़िया', 'हो गई',
+  // Bahasa Indonesia
+  'ya', 'iya', 'baik', 'sudah', 'benar', 'terima kasih', 'berhasil', 'selesai',
+  // Mandarin Chinese
+  '是', '好', '对', '谢谢', '完成', '好的', '成功', '解决了',
+);
+const isNegative = msg => has(msg,
+  // English
+  'no', 'not', 'still', "doesn't", "didn't", "can't", 'cannot', 'nope', 'never',
+  // Hindi
+  'नहीं', 'अभी भी', 'नही', 'काम नहीं',
+  // Bahasa Indonesia
+  'tidak', 'belum', 'masih', 'gagal',
+  // Mandarin Chinese
+  '不', '没有', '还是', '还没', '失败',
+);
 
 // ─── Wallet top-up flow ────────────────────────────────────────────────────
 const walletTopupFlow = {
@@ -315,42 +337,70 @@ const FLOWS = {
 // ─── Public API ────────────────────────────────────────────────────────────
 
 /**
- * Get the initial greeting for an issue type.
- * @param {string} issueType
+ * Get the initial greeting — always the language selection prompt.
+ * The issue-specific opener is sent after the customer selects a language.
  * @returns {{ message: string, nextState: string }}
  */
-export const getTriageOpener = (issueType) => {
-  const flow = FLOWS[issueType] || FLOWS.general;
-  return { message: flow.initial.message, nextState: flow.initial.nextState };
+export const getTriageOpener = () => {
+  return { message: LANGUAGE_SELECTION_MSG, nextState: 'lang_pending' };
 };
 
 /**
  * Process a customer message through the triage engine.
  * @param {string} issueType     - e.g. 'wallet_topup'
- * @param {string} currentState  - current state name
+ * @param {string} currentState  - current state name, or 'lang_pending'
  * @param {string} customerMsg   - raw customer message text
  * @param {object} ctx           - optional context variables (phone, timestamp)
- * @returns {{ message: string, nextState: string, isTerminal: boolean }}
+ * @param {string} lang          - current language code (default 'en')
+ * @returns {{ message: string, nextState: string, isTerminal: boolean, lang?: string }}
  */
-export const processTriageMessage = (issueType, currentState, customerMsg, ctx = {}) => {
+export const processTriageMessage = (issueType, currentState, customerMsg, ctx = {}, lang = 'en') => {
+  // ── Language selection phase ─────────────────────────────────────────
+  if (currentState === 'lang_pending') {
+    const detectedLang = detectLanguage(customerMsg);
+    if (!detectedLang) {
+      return { message: LANG_REASK, nextState: 'lang_pending', isTerminal: false };
+    }
+    const flow       = FLOWS[issueType] || FLOWS.general;
+    const confirm    = LANG_CONFIRM[detectedLang] || LANG_CONFIRM.en;
+    const initialMsg = getTranslatedMessage(issueType, 'initial', 'message', detectedLang)
+                    || flow.initial.message;
+    return {
+      message:   `${confirm}\n\n${initialMsg}`,
+      nextState: flow.initial.nextState,
+      isTerminal: false,
+      lang:      detectedLang,
+    };
+  }
+
+  // ── Normal triage flow ───────────────────────────────────────────────
   const flow  = FLOWS[issueType] || FLOWS.general;
   const state = flow.states[currentState];
 
   if (!state) {
-    // Unknown state — fall back to general closing
-    return { message: "Thank you! Is there anything else I can help you with?", nextState: 'terminal', isTerminal: false };
+    return {
+      message:   getTranslatedMessage('general', 'closing', 'onMatch', lang) || "Thank you! Is there anything else I can help you with?",
+      nextState: 'terminal',
+      isTerminal: false,
+    };
   }
 
   if (state.isTerminal) {
-    return { message: "Thank you for reaching out! Feel free to contact us anytime. 😊", nextState: 'terminal', isTerminal: true };
+    return {
+      message:   getTranslatedMessage('general', 'closing', 'onNoMatch', lang) || "Thank you for reaching out! Feel free to contact us anytime. 😊",
+      nextState: 'terminal',
+      isTerminal: true,
+    };
   }
 
-  const matched = state.detect ? state.detect(customerMsg) : true;
-  const outcome = matched ? state.onMatch : state.onNoMatch;
+  const matched  = state.detect ? state.detect(customerMsg) : true;
+  const outcome  = matched ? state.onMatch : state.onNoMatch;
   const isTerminal = outcome.nextState === 'terminal';
 
-  // Substitute context variables
-  const message = outcome.message
+  // Look up translated message, fall back to original English
+  const matchType = matched ? 'onMatch' : 'onNoMatch';
+  const translated = getTranslatedMessage(issueType, currentState, matchType, lang);
+  const message = (translated || outcome.message)
     .replace('{phone}', ctx.phone || 'your registered number')
     .replace('{timestamp}', String(Date.now()).slice(-6))
     .replace('{amount}', ctx.amount || '');
