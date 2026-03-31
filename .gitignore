@@ -1,3 +1,8 @@
 node_modules/
+build/
 # Local Netlify folder
 .netlify
+# Environment / secrets
+.env
+.env.local
+.env.*.local

@@ -7,6 +7,7 @@ import { processTriageMessage, getTriageOpener, getCustomerIssueType } from '../
 import { SUPPORTED_LANGUAGES } from '../../../utils/languages';
 import { playMessageTone, playAssignTone } from '../../../utils/sounds';
 import { STATUS_META } from '../../../data/agentsData';
+import { readIVRConfig } from '../../../utils/storage';
 
 // ─── Message bubble ───────────────────────────────────────────────────────────
 const MessageBubble = ({ msg }) => {
@@ -175,6 +176,18 @@ const ChatPage = () => {
   const [polling,         setPolling]         = useState(false);
   const [showAgentPicker, setShowAgentPicker] = useState(false);
 
+  // ── IVR state ─────────────────────────────────────────────────────────────
+  const [ivrCallSid,       setIvrCallSid]       = useState(null);
+  const [ivrStatus,        setIvrStatus]        = useState(null); // null | 'initiating' | 'in-progress' | 'completed' | 'failed'
+  const [ivrTranscript,    setIvrTranscript]    = useState([]);
+  const [ivrProvider,      setIvrProvider]      = useState('');
+  const [showIvrPanel,     setShowIvrPanel]     = useState(false);
+  const [ivrError,         setIvrError]         = useState(null);
+  const [translatedEntries,setTranslatedEntries]= useState({});
+  const [translatingIdx,   setTranslatingIdx]   = useState(null);
+  const [initMode,         setInitMode]         = useState('bot'); // 'bot'|'ivr'|'human' — used in empty panel
+  const ivrPollRef = useRef(null);
+
   const messagesEndRef   = useRef(null);
   const importedMsgIds   = useRef(new Set());
   const pollIntervalRef  = useRef(null);
@@ -191,7 +204,7 @@ const ChatPage = () => {
   const issueType       = getCustomerIssueType(customer);
 
   // ── Auto-scroll ──────────────────────────────────────────────────────────────
-  useEffect(() => { messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' }); }, [messages, botTyping]);
+  useEffect(() => { messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' }); }, [messages, botTyping, ivrTranscript]);
 
   // ── Seed imported WA IDs ─────────────────────────────────────────────────────
   useEffect(() => { messages.forEach(m => { if (m.waId) importedMsgIds.current.add(m.waId); }); }, []); // eslint-disable-line
@@ -388,6 +401,196 @@ const ChatPage = () => {
     sendMessage(customerId, msg, 'customer', customer?.name);
   };
 
+  // ── IVR: poll transcript ─────────────────────────────────────────────────────
+  const pollIVRTranscript = useCallback(async (callSid) => {
+    try {
+      const res = await fetch(`/.netlify/functions/call-transcript?callSid=${callSid}`);
+      if (!res.ok) return;
+      const data = await res.json();
+      setIvrTranscript(data.entries || []);
+      setIvrStatus(data.status || 'in-progress');
+      if (data.status === 'completed' || data.status === 'failed') {
+        clearInterval(ivrPollRef.current);
+      }
+    } catch (_) {}
+  }, []);
+
+  useEffect(() => () => clearInterval(ivrPollRef.current), []);
+
+  // ── IVR: initiate outbound call ──────────────────────────────────────────────
+  const handleInitiateIVR = useCallback(async () => {
+    if (!customer) return;
+    const cfg = readIVRConfig();
+    const provider = cfg.activeProvider || 'twilio';
+    const providerCfg = provider === 'twilio' ? cfg.twilio : cfg.exotel;
+    setIvrError(null);
+    setIvrStatus('initiating');
+    setIvrTranscript([]);
+    setTranslatedEntries({});
+    setIvrProvider(provider);
+    try {
+      const res = await fetch('/.netlify/functions/initiate-call', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          provider,
+          customerPhone: customer.phone,
+          customerId,
+          config: providerCfg,
+          geminiKey: cfg.geminiKey,
+          baseUrl: window.location.origin,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok || !data.success) throw new Error(data.error || 'Failed to initiate call');
+      setIvrCallSid(data.callSid);
+      setIvrStatus('in-progress');
+      addNotification({ type: 'bot_initiated', customerId, customerName: customer.name, message: `IVR call initiated to ${customer.name} via ${provider}` });
+      ivrPollRef.current = setInterval(() => pollIVRTranscript(data.callSid), 3000);
+    } catch (err) {
+      setIvrError(err.message || 'Call initiation failed');
+      setIvrStatus('failed');
+    }
+  }, [customer, customerId, addNotification, pollIVRTranscript]);
+
+  // ── IVR: transfer to WhatsApp ────────────────────────────────────────────────
+  const handleTransferToWhatsApp = useCallback(() => {
+    const lastBotEntry = [...ivrTranscript].reverse().find(e => e.speaker === 'bot');
+    const summary = lastBotEntry
+      ? `📞 *IVR Call Summary*\n\nYour issue has been noted. ${lastBotEntry.text}\n\nOur team will continue here on WhatsApp.`
+      : '📞 *IVR Call Summary*\n\nThank you for calling. Our team will continue supporting you via WhatsApp.';
+    sendMessage(customerId, summary, 'ai_bot', 'Agently AI');
+    const ph = '+' + (customer?.phone || '').replace(/\D/g, '');
+    sendWhatsAppMessage(ph, formatBotMessage(summary)).catch(() => {});
+    setShowIvrPanel(false);
+    addNotification({ type: 'bot_initiated', customerId, customerName: customer.name, message: 'IVR call transferred to WhatsApp chat' });
+  }, [ivrTranscript, customerId, customer, sendMessage, addNotification]);
+
+  // ── IVR: translate a transcript entry via Gemini ────────────────────────────
+  const handleTranslateEntry = useCallback(async (index, text) => {
+    setTranslatingIdx(index);
+    try {
+      const cfg = readIVRConfig();
+      const key = cfg.geminiKey;
+      if (!key) { setTranslatedEntries(p => ({ ...p, [index]: '(no Gemini key configured)' })); return; }
+      const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${key}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ contents: [{ parts: [{ text: `Translate the following text to English. Return only the translation:\n\n${text}` }] }] }),
+      });
+      const data = await res.json();
+      const translated = data.candidates?.[0]?.content?.parts?.[0]?.text?.trim() || '(translation unavailable)';
+      setTranslatedEntries(p => ({ ...p, [index]: translated }));
+    } catch { setTranslatedEntries(p => ({ ...p, [index]: '(translation failed)' })); }
+    finally { setTranslatingIdx(null); }
+  }, []);
+
+  // ── Download full chat history ───────────────────────────────────────────────
+  const [downloading, setDownloading] = useState(false);
+
+  const handleDownloadHistory = useCallback(async () => {
+    if (!customer) return;
+    setDownloading(true);
+
+    // Fetch the latest IVR transcript fresh from server (stale state may be empty)
+    let freshIvrEntries = ivrTranscript;
+    let freshIvrStatus  = ivrStatus;
+    const sidToFetch    = ivrCallSid;
+    if (sidToFetch) {
+      try {
+        const res  = await fetch(`/.netlify/functions/call-transcript?callSid=${sidToFetch}`);
+        if (res.ok) {
+          const data  = await res.json();
+          freshIvrEntries = data.entries  || freshIvrEntries;
+          freshIvrStatus  = data.status   || freshIvrStatus;
+        }
+      } catch (_) {}
+    }
+
+    const hr  = '─'.repeat(60);
+    const now = new Date().toLocaleString('en-IN');
+
+    // ── Header ──
+    let txt = '';
+    txt += '╔' + '═'.repeat(62) + '╗\n';
+    txt += '║  AGENTLY AI — COMPLETE CHAT HISTORY' + ' '.repeat(26) + '║\n';
+    txt += '╚' + '═'.repeat(62) + '╝\n\n';
+
+    // ── Customer Profile ──
+    txt += `CUSTOMER PROFILE\n${hr}\n`;
+    txt += `Name          : ${customer.name}\n`;
+    txt += `Phone         : ${customer.phone}\n`;
+    txt += `Account No    : ${customer.accountNumber || '—'}\n`;
+    txt += `Balance       : ₹${(customer.balance || 0).toLocaleString('en-IN')}\n`;
+    txt += `KYC Status    : ${customer.kycStatus || '—'}\n`;
+    txt += `Tier          : ${customer.tier || '—'}\n`;
+    txt += `Member Since  : ${customer.joinDate ? new Date(customer.joinDate).toLocaleDateString('en-IN', { year: 'numeric', month: 'short' }) : '—'}\n\n`;
+
+    // ── Issues ──
+    if (customer.issues?.length > 0) {
+      txt += `ISSUES (${customer.issues.length} total, ${openIssues.length} open)\n${hr}\n`;
+      customer.issues.forEach(issue => {
+        const sev    = issue.severity?.toUpperCase() || 'NORMAL';
+        const status = issue.status?.toUpperCase().replace('_', ' ') || '';
+        txt += `[${sev}] ${issue.title} — ${status}\n`;
+        txt += `  ${issue.description || ''}\n\n`;
+      });
+    }
+
+    // ── WhatsApp Conversation ──
+    if (messages.length > 0) {
+      txt += `WHATSAPP CONVERSATION (${messages.length} messages)\n${hr}\n`;
+      messages.forEach(m => {
+        const t   = new Date(m.timestamp).toLocaleString('en-IN', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: true });
+        const who = m.sender === 'customer'
+          ? customer.name
+          : m.sender === 'ai_bot'
+            ? 'Agently AI Bot'
+            : (m.senderName || 'Human Agent');
+        txt += `[${t}] ${who}:\n${m.message}\n\n`;
+      });
+    } else {
+      txt += `WHATSAPP CONVERSATION\n${hr}\n(No WhatsApp messages recorded)\n\n`;
+    }
+
+    // ── IVR Voice Call ──
+    if (freshIvrEntries.length > 0 || sidToFetch) {
+      const providerLabel = ivrProvider ? ivrProvider.toUpperCase() : 'IVR';
+      txt += `IVR VOICE CALL — ${providerLabel}\n${hr}\n`;
+      if (sidToFetch)    txt += `Call ID       : ${sidToFetch}\n`;
+      if (freshIvrStatus) txt += `Status        : ${freshIvrStatus}\n`;
+      if (ivrTranscript[0]?.timestamp || freshIvrEntries[0]?.timestamp)
+        txt += `Started       : ${new Date(freshIvrEntries[0]?.timestamp).toLocaleString('en-IN')}\n`;
+      txt += '\n';
+
+      if (freshIvrEntries.length === 0) {
+        txt += '(No transcript entries available)\n\n';
+      } else {
+        freshIvrEntries.forEach((e, idx) => {
+          const t   = e.timestamp ? new Date(e.timestamp).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: true }) : '--:--';
+          const who = e.speaker === 'bot' ? 'IVR Bot' : e.speaker === 'customer' ? customer.name : 'System';
+          txt += `[${t}] ${who}:\n  ${e.text}\n`;
+          if (translatedEntries[idx]) txt += `  [Translated EN] ${translatedEntries[idx]}\n`;
+          txt += '\n';
+        });
+      }
+    }
+
+    // ── Footer ──
+    txt += `${hr}\nDownloaded via Agently AI Platform · ${now}\n`;
+
+    const blob = new Blob([txt], { type: 'text/plain;charset=utf-8' });
+    const url  = URL.createObjectURL(blob);
+    const a    = document.createElement('a');
+    a.href     = url;
+    a.download = `chat-${customer.name.replace(/\s+/g, '-')}-${Date.now()}.txt`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+    setDownloading(false);
+  }, [customer, messages, ivrTranscript, ivrProvider, ivrStatus, ivrCallSid, translatedEntries, openIssues]);
+
   // ── Phone edit ───────────────────────────────────────────────────────────────
   const handleSavePhone = () => {
     const c = phoneInput.replace(/\D/g, '');
@@ -419,6 +622,15 @@ const ChatPage = () => {
           getSortedAgents={getSortedAgents}
           getAgentLoad={getAgentLoad}
         />
+      )}
+
+      {/* IVR error toast */}
+      {ivrError && (
+        <div style={{ position: 'fixed', top: 20, right: 20, zIndex: 1200, background: '#fef2f2', border: '1px solid #fecaca', borderRadius: 12, padding: '10px 16px', display: 'flex', alignItems: 'center', gap: 8, boxShadow: '0 4px 20px rgba(0,0,0,0.1)', maxWidth: 360 }}>
+          <span>⚠️</span>
+          <p style={{ fontSize: 12, color: '#dc2626', fontWeight: 600, flex: 1 }}>{ivrError}</p>
+          <button onClick={() => setIvrError(null)} style={{ width: 20, height: 20, background: 'none', border: 'none', cursor: 'pointer', color: '#dc2626', fontSize: 14, lineHeight: 1 }}>✕</button>
+        </div>
       )}
 
       <div style={{ display: 'flex', flex: 1, height: '100vh', overflow: 'hidden' }}>
@@ -642,6 +854,20 @@ const ChatPage = () => {
                   + Simulate Reply
                 </button>
               )}
+
+              {/* Download chat history */}
+              <button onClick={handleDownloadHistory} disabled={downloading} title="Download full chat history" style={{ display: 'flex', alignItems: 'center', gap: 5, padding: '6px 11px', borderRadius: 8, fontSize: 11, fontWeight: 600, background: downloading ? '#f1f5f9' : '#fff', color: downloading ? 'var(--gray-400)' : 'var(--gray-600)', border: '1px solid var(--gray-200)', cursor: downloading ? 'wait' : 'pointer', fontFamily: 'var(--font-body)', whiteSpace: 'nowrap' }}>
+                {downloading ? '⏳ Preparing…' : '⬇ Download'}
+              </button>
+
+              {/* IVR Call button */}
+              <button
+                onClick={handleInitiateIVR}
+                disabled={ivrStatus === 'initiating' || ivrStatus === 'in-progress'}
+                style={{ display: 'flex', alignItems: 'center', gap: 5, padding: '6px 12px', borderRadius: 8, fontSize: 11, fontWeight: 700, background: (ivrStatus === 'initiating' || ivrStatus === 'in-progress') ? '#fef3c7' : 'linear-gradient(135deg, #dc2626, #b91c1c)', color: (ivrStatus === 'initiating' || ivrStatus === 'in-progress') ? '#92400e' : '#fff', border: 'none', cursor: (ivrStatus === 'initiating' || ivrStatus === 'in-progress') ? 'not-allowed' : 'pointer', fontFamily: 'var(--font-body)', whiteSpace: 'nowrap', boxShadow: (ivrStatus === 'initiating' || ivrStatus === 'in-progress') ? 'none' : '0 2px 8px rgba(220,38,38,0.3)' }}>
+                📞 {ivrStatus === 'initiating' ? 'Calling…' : ivrStatus === 'in-progress' ? 'In Call' : 'IVR Call'}
+              </button>
+
             </div>
           </div>
 
@@ -690,25 +916,156 @@ const ChatPage = () => {
                       <p style={{ fontSize: 11, color: '#92400e', marginTop: 3, lineHeight: 1.4 }}>{openIssues[0].description}</p>
                     </div>
                   )}
-                  <div style={{ display: 'flex', gap: 8, marginBottom: 18, justifyContent: 'center' }}>
-                    <div onClick={() => isHumanMode && handleReleaseAgent()} style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '7px 14px', borderRadius: 10, background: !isHumanMode ? '#dbeafe' : '#f1f5f9', border: `1px solid ${!isHumanMode ? '#bfdbfe' : '#e2e8f0'}`, cursor: 'pointer' }}>
-                      <span>🤖</span><span style={{ fontSize: 12, fontWeight: 700, color: !isHumanMode ? '#1e40af' : '#94a3b8' }}>Bot First</span>
-                    </div>
-                    <div onClick={() => setShowAgentPicker(true)} style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '7px 14px', borderRadius: 10, background: isHumanMode ? '#ede9fe' : '#f1f5f9', border: `1px solid ${isHumanMode ? '#ddd6fe' : '#e2e8f0'}`, cursor: 'pointer' }}>
-                      <span>👤</span><span style={{ fontSize: 12, fontWeight: 700, color: isHumanMode ? '#5b21b6' : '#94a3b8' }}>Agent Direct</span>
-                    </div>
+                  {/* 3-mode selector */}
+                  <div style={{ display: 'flex', gap: 6, marginBottom: 16, justifyContent: 'center' }}>
+                    {[
+                      { key: 'bot',   icon: '🤖', label: 'AI Bot',      color: '#1e40af', bg: '#dbeafe', border: '#bfdbfe' },
+                      { key: 'ivr',   icon: '📞', label: 'IVR Call',    color: '#b91c1c', bg: '#fee2e2', border: '#fca5a5' },
+                      { key: 'human', icon: '👤', label: 'Human Agent', color: '#5b21b6', bg: '#ede9fe', border: '#ddd6fe' },
+                    ].map(opt => (
+                      <div key={opt.key}
+                        onClick={() => setInitMode(opt.key)}
+                        style={{ display: 'flex', alignItems: 'center', gap: 5, padding: '7px 12px', borderRadius: 10, cursor: 'pointer', transition: 'all 0.15s',
+                          background: initMode === opt.key ? opt.bg : '#f1f5f9',
+                          border: `1.5px solid ${initMode === opt.key ? opt.border : '#e2e8f0'}` }}>
+                        <span style={{ fontSize: 13 }}>{opt.icon}</span>
+                        <span style={{ fontSize: 11, fontWeight: 700, color: initMode === opt.key ? opt.color : '#94a3b8' }}>{opt.label}</span>
+                      </div>
+                    ))}
                   </div>
-                  <button onClick={handleInitiateBot} disabled={initiating} style={{ width: '100%', padding: '13px 20px', borderRadius: 12, fontSize: 14, fontWeight: 700, background: initiating ? '#e2e8f0' : 'linear-gradient(135deg, #1e5fb5, #7c3aed)', color: initiating ? '#94a3b8' : '#fff', border: 'none', cursor: initiating ? 'not-allowed' : 'pointer', fontFamily: 'var(--font-body)', boxShadow: initiating ? 'none' : '0 4px 20px rgba(30,95,181,0.35)', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8 }}>
+                  <button
+                    onClick={initMode === 'ivr' ? handleInitiateIVR : initMode === 'human' ? () => setShowAgentPicker(true) : handleInitiateBot}
+                    disabled={initiating || (initMode === 'ivr' && (ivrStatus === 'initiating' || ivrStatus === 'in-progress'))}
+                    style={{ width: '100%', padding: '13px 20px', borderRadius: 12, fontSize: 14, fontWeight: 700,
+                      background: initiating ? '#e2e8f0' : initMode === 'ivr' ? 'linear-gradient(135deg,#dc2626,#b91c1c)' : initMode === 'human' ? 'linear-gradient(135deg,#7c3aed,#6d28d9)' : 'linear-gradient(135deg,#1e5fb5,#7c3aed)',
+                      color: initiating ? '#94a3b8' : '#fff', border: 'none', cursor: initiating ? 'not-allowed' : 'pointer',
+                      fontFamily: 'var(--font-body)', boxShadow: initiating ? 'none' : '0 4px 20px rgba(30,95,181,0.3)',
+                      display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8 }}>
                     {initiating ? (
-                      <><div style={{ width: 14, height: 14, borderRadius: '50%', border: '2px solid #94a3b8', borderTopColor: 'transparent', animation: 'spin 0.7s linear infinite' }} />Sending greeting…</>
+                      <><div style={{ width: 14, height: 14, borderRadius: '50%', border: '2px solid #94a3b8', borderTopColor: 'transparent', animation: 'spin 0.7s linear infinite' }} />Starting…</>
+                    ) : initMode === 'ivr' ? (
+                      <>📞 {ivrStatus === 'in-progress' ? 'Call In Progress' : 'Start IVR Call'}</>
+                    ) : initMode === 'human' ? (
+                      <>👤 Assign Human Agent</>
                     ) : (
                       <><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"><polygon points="5 3 19 12 5 21 5 3"/></svg>Initiate Bot Conversation</>
                     )}
                   </button>
-                  <p style={{ fontSize: 10, color: 'var(--gray-400)', marginTop: 10 }}>Will send triage greeting to <strong>{customer.phone}</strong></p>
+                  <p style={{ fontSize: 10, color: 'var(--gray-400)', marginTop: 10 }}>
+                    {initMode === 'ivr' ? <>Will call <strong>{customer.phone}</strong> via {readIVRConfig().activeProvider}</> : <>Will send triage greeting to <strong>{customer.phone}</strong></>}
+                  </p>
                 </div>
               </div>
             )}
+            {/* ── Inline IVR Transcript ── */}
+            {ivrCallSid && (
+              <div style={{ marginTop: 16 }}>
+                {/* IVR session header */}
+                <div style={{ textAlign: 'center', marginBottom: 12 }}>
+                  <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8, padding: '6px 16px', borderRadius: 20, background: 'linear-gradient(135deg,#dc262620,#b91c1c10)', border: '1px solid #fca5a5', fontSize: 11, fontWeight: 700, color: '#b91c1c' }}>
+                    📞 IVR Voice Call · {ivrProvider === 'twilio' ? 'Twilio' : 'Exotel'} · {customer.phone}
+                    <span style={{ padding: '1px 8px', borderRadius: 10, background: ivrStatus === 'in-progress' ? '#dcfce7' : ivrStatus === 'completed' ? '#d1fae5' : ivrStatus === 'failed' ? '#fee2e2' : '#fef3c7', color: ivrStatus === 'in-progress' ? '#15803d' : ivrStatus === 'completed' ? '#065f46' : ivrStatus === 'failed' ? '#dc2626' : '#92400e', fontSize: 9, fontWeight: 800 }}>
+                      {ivrStatus === 'in-progress' ? '● LIVE' : ivrStatus === 'completed' ? '✓ ENDED' : ivrStatus === 'failed' ? '✕ FAILED' : ivrStatus?.toUpperCase() || 'CONNECTING'}
+                    </span>
+                  </span>
+                </div>
+
+                {/* Transcript entries */}
+                {ivrTranscript.length === 0 && (ivrStatus === 'initiating' || ivrStatus === 'in-progress') && (
+                  <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 8, padding: '24px 0' }}>
+                    <div style={{ width: 32, height: 32, borderRadius: '50%', border: '3px solid #fecaca', borderTopColor: '#dc2626', animation: 'spin 0.8s linear infinite' }} />
+                    <p style={{ fontSize: 12, color: 'var(--gray-400)' }}>Connecting call…</p>
+                  </div>
+                )}
+
+                {ivrTranscript.map((entry, idx) => {
+                  const isBot      = entry.speaker === 'bot';
+                  const isCust     = entry.speaker === 'customer';
+                  const isSystem   = entry.speaker === 'system';
+                  const hasHindi   = /[\u0900-\u097F]/.test(entry.text);
+                  const translated = translatedEntries[idx];
+                  const isTranslating = translatingIdx === idx;
+
+                  if (isSystem) return (
+                    <div key={idx} style={{ textAlign: 'center', margin: '6px 0' }}>
+                      <span style={{ display: 'inline-block', padding: '3px 14px', borderRadius: 20, background: '#f1f5f9', color: 'var(--gray-400)', fontSize: 10, fontWeight: 600 }}>{entry.text}</span>
+                    </div>
+                  );
+
+                  return (
+                    <div key={idx} style={{ display: 'flex', flexDirection: isCust ? 'row-reverse' : 'row', gap: 8, alignItems: 'flex-start', marginBottom: 10 }}>
+                      <div style={{ width: 26, height: 26, borderRadius: '50%', background: isBot ? '#fee2e2' : '#dcfce7', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 12, flexShrink: 0, marginTop: 2 }}>
+                        {isBot ? '📞' : '🎙️'}
+                      </div>
+                      <div style={{ maxWidth: '72%', display: 'flex', flexDirection: 'column', gap: 3, alignItems: isCust ? 'flex-end' : 'flex-start' }}>
+                        <span style={{ fontSize: 9, fontWeight: 700, color: isBot ? '#b91c1c' : '#15803d', marginLeft: isCust ? 0 : 2 }}>
+                          {isBot ? 'IVR Bot' : customer.name}
+                        </span>
+                        <div style={{ background: isBot ? '#fff1f2' : '#f0fdf4', border: `1px solid ${isBot ? '#fecaca' : '#bbf7d0'}`, borderRadius: isBot ? '16px 16px 16px 4px' : '16px 16px 4px 16px', padding: '8px 12px', fontSize: 13, color: 'var(--gray-800)', lineHeight: 1.5 }}>
+                          <p style={{ margin: 0 }}>{entry.text}</p>
+                          {translated && (
+                            <p style={{ margin: '6px 0 0', fontSize: 11, color: '#6d28d9', borderTop: '1px dashed #ddd6fe', paddingTop: 5, fontStyle: 'italic' }}>
+                              🌐 {translated}
+                            </p>
+                          )}
+                        </div>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginLeft: isCust ? 0 : 2 }}>
+                          <span style={{ fontSize: 9, color: 'var(--gray-400)' }}>
+                            {entry.timestamp ? new Date(entry.timestamp).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' }) : ''}
+                          </span>
+                          {hasHindi && !translated && (
+                            <button onClick={() => handleTranslateEntry(idx, entry.text)} disabled={isTranslating} style={{ fontSize: 9, fontWeight: 700, padding: '1px 7px', borderRadius: 8, background: isTranslating ? '#f3f4f6' : '#ede9fe', color: isTranslating ? '#9ca3af' : '#6d28d9', border: '1px solid #ddd6fe', cursor: isTranslating ? 'wait' : 'pointer', fontFamily: 'var(--font-body)' }}>
+                              {isTranslating ? '…' : '🌐 Translate'}
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })}
+
+                {/* Live spinner for in-progress after some entries */}
+                {ivrStatus === 'in-progress' && ivrTranscript.length > 0 && (
+                  <div style={{ display: 'flex', gap: 6, alignItems: 'center', padding: '4px 0 8px 34px' }}>
+                    {[0,1,2].map(i => <div key={i} style={{ width: 6, height: 6, borderRadius: '50%', background: '#fca5a5', animation: `pulse 1.2s ${i * 0.25}s ease-in-out infinite` }} />)}
+                    <span style={{ fontSize: 10, color: 'var(--gray-400)' }}>Listening…</span>
+                  </div>
+                )}
+
+                {/* Post-call actions */}
+                {(ivrStatus === 'completed' || ivrStatus === 'failed') && (
+                  <div style={{ marginTop: 16, marginBottom: 8 }}>
+                    <div style={{ textAlign: 'center', marginBottom: 10 }}>
+                      <span style={{ display: 'inline-block', padding: '4px 16px', borderRadius: 20, background: ivrStatus === 'completed' ? '#d1fae5' : '#fee2e2', color: ivrStatus === 'completed' ? '#065f46' : '#dc2626', fontSize: 11, fontWeight: 700 }}>
+                        {ivrStatus === 'completed' ? '✓ IVR Call Ended' : '✕ Call Failed'}
+                      </span>
+                    </div>
+                    <div style={{ display: 'flex', gap: 8, justifyContent: 'center', flexWrap: 'wrap' }}>
+                      <button onClick={() => { setIvrCallSid(null); setIvrTranscript([]); setIvrStatus(null); setIvrError(null); setTranslatedEntries({}); handleInitiateIVR(); }}
+                        style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '9px 16px', borderRadius: 10, fontSize: 12, fontWeight: 700, background: 'linear-gradient(135deg,#dc2626,#b91c1c)', color: '#fff', border: 'none', cursor: 'pointer', fontFamily: 'var(--font-body)', boxShadow: '0 2px 8px rgba(220,38,38,0.3)' }}>
+                        📞 IVR Again
+                      </button>
+                      <button onClick={handleInitiateBot}
+                        style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '9px 16px', borderRadius: 10, fontSize: 12, fontWeight: 700, background: 'linear-gradient(135deg,#1e5fb5,#2979d8)', color: '#fff', border: 'none', cursor: 'pointer', fontFamily: 'var(--font-body)', boxShadow: '0 2px 8px rgba(30,95,181,0.3)' }}>
+                        🤖 AI Bot Chat
+                      </button>
+                      <button onClick={() => setShowAgentPicker(true)}
+                        style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '9px 16px', borderRadius: 10, fontSize: 12, fontWeight: 700, background: 'linear-gradient(135deg,#7c3aed,#6d28d9)', color: '#fff', border: 'none', cursor: 'pointer', fontFamily: 'var(--font-body)', boxShadow: '0 2px 8px rgba(124,58,237,0.3)' }}>
+                        👤 Human Agent
+                      </button>
+                    </div>
+                    {ivrTranscript.length > 0 && (
+                      <div style={{ textAlign: 'center', marginTop: 10 }}>
+                        <button onClick={handleDownloadHistory} disabled={downloading} style={{ fontSize: 11, fontWeight: 600, padding: '5px 14px', borderRadius: 8, background: downloading ? '#f1f5f9' : '#f8fafc', color: downloading ? 'var(--gray-400)' : 'var(--gray-600)', border: '1px solid var(--gray-200)', cursor: downloading ? 'wait' : 'pointer', fontFamily: 'var(--font-body)' }}>
+                          {downloading ? '⏳ Preparing…' : '⬇ Download Full Transcript'}
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+            )}
+
             <div ref={messagesEndRef} />
           </div>
 
