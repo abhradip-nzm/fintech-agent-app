@@ -5,7 +5,26 @@ import Layout from '../../../components/Layout';
 import { StatCard, Card, Button, Badge } from '../../../components/UI';
 import { useApp } from '../../../context/AppContext';
 import { analyticsData, issueCategories, resolutionTrend } from '../../../data/mockData';
-import { readWhapiToken, writeWhapiToken } from '../../../utils/storage';
+import { readWhapiToken, writeWhapiToken, readIVRConfig, writeIVRConfig } from '../../../utils/storage';
+
+const mask = (t) => {
+  if (!t) return '—';
+  if (t.length <= 8) return '••••••••';
+  return t.slice(0, 4) + '••••••••••••' + t.slice(-4);
+};
+
+// ── Inline editable credential row ─────────────────────────────────────────
+const CredRow = ({ label, value, onChange, type = 'text', mono = true }) => (
+  <div style={{ display: 'flex', flexDirection: 'column', gap: 3 }}>
+    <label style={{ fontSize: 10, fontWeight: 700, color: 'var(--gray-500)', textTransform: 'uppercase', letterSpacing: '0.05em' }}>{label}</label>
+    <input
+      type={type}
+      value={value}
+      onChange={e => onChange(e.target.value)}
+      style={{ padding: '7px 10px', borderRadius: 7, border: '1.5px solid var(--gray-200)', fontSize: 12, fontFamily: mono ? 'monospace' : 'var(--font-body)', color: 'var(--gray-800)', outline: 'none', background: '#fff', width: '100%', boxSizing: 'border-box' }}
+    />
+  </div>
+);
 
 const Dashboard = () => {
   const navigate = useNavigate();
@@ -15,11 +34,11 @@ const Dashboard = () => {
 
   const COLORS = ['#ef4444', '#f59e0b', '#8b5cf6', '#3b82f6', '#10b981'];
 
-  // ── Whapi token settings state ──────────────────────────────────────────
-  const [tokenInput,    setTokenInput]    = useState(readWhapiToken());
-  const [showToken,     setShowToken]     = useState(false);
-  const [editingToken,  setEditingToken]  = useState(false);
-  const [tokenStatus,   setTokenStatus]   = useState(null); // { type: 'success'|'error', text }
+  // ── Whapi token state ───────────────────────────────────────────────────
+  const [tokenInput,   setTokenInput]   = useState(readWhapiToken());
+  const [showToken,    setShowToken]    = useState(false);
+  const [editingToken, setEditingToken] = useState(false);
+  const [tokenStatus,  setTokenStatus]  = useState(null);
 
   const handleSaveToken = () => {
     if (!tokenInput.trim()) return;
@@ -39,6 +58,25 @@ const Dashboard = () => {
     if (t.length <= 8) return '••••••••';
     return t.slice(0, 4) + '••••••••••••' + t.slice(-4);
   };
+
+  // ── IVR config state ────────────────────────────────────────────────────
+  const [ivrCfg,       setIvrCfg]       = useState(readIVRConfig());
+  const [ivrStatus,    setIvrStatus]    = useState(null);
+  const [ivrExpanded,  setIvrExpanded]  = useState(false);
+
+  const saveIVR = () => {
+    writeIVRConfig(ivrCfg);
+    setIvrStatus({ type: 'success', text: 'IVR configuration saved ✓' });
+    setTimeout(() => setIvrStatus(null), 3000);
+  };
+
+  const updateTwilio = (field, val) =>
+    setIvrCfg(c => ({ ...c, twilio: { ...c.twilio, [field]: val } }));
+
+  const updateExotel = (field, val) =>
+    setIvrCfg(c => ({ ...c, exotel: { ...c.exotel, [field]: val } }));
+
+  const activeProvider = ivrCfg.activeProvider || 'twilio';
 
   return (
     <Layout
@@ -285,6 +323,124 @@ const Dashboard = () => {
           </Card>
         </div>
       </div>
+
+      {/* ── IVR Voice Agent Settings ─────────────────────────────────────── */}
+      <Card style={{ padding: '24px', marginTop: '24px' }}>
+        {/* Header row */}
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 16 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+            <span style={{ fontSize: 26 }}>📞</span>
+            <div>
+              <h3 style={{ fontFamily: 'var(--font-display)', fontWeight: 700, fontSize: 15, color: 'var(--gray-900)' }}>IVR Voice Agent</h3>
+              <p style={{ fontSize: 11, color: 'var(--gray-400)', marginTop: 1 }}>Configure outbound AI voice calls via Twilio or Exotel</p>
+            </div>
+          </div>
+          <button
+            onClick={() => setIvrExpanded(v => !v)}
+            style={{ padding: '6px 14px', borderRadius: 8, fontSize: 12, fontWeight: 600, background: ivrExpanded ? '#f1f5f9' : '#eff6ff', color: ivrExpanded ? '#64748b' : '#1e5fb5', border: `1px solid ${ivrExpanded ? '#e2e8f0' : '#bfdbfe'}`, cursor: 'pointer', fontFamily: 'var(--font-body)' }}
+          >
+            {ivrExpanded ? '▲ Collapse' : '▼ Configure'}
+          </button>
+        </div>
+
+        {/* Provider toggle */}
+        <div style={{ display: 'flex', gap: 8, marginBottom: ivrExpanded ? 20 : 0 }}>
+          {['twilio', 'exotel'].map(p => (
+            <button
+              key={p}
+              onClick={() => {
+                const updated = { ...ivrCfg, activeProvider: p };
+                setIvrCfg(updated);
+                writeIVRConfig(updated);  // persist immediately — no need to click Save
+              }}
+              style={{
+                flex: 1, padding: '10px 0', borderRadius: 10, fontWeight: 700, fontSize: 13,
+                fontFamily: 'var(--font-body)', cursor: 'pointer', transition: 'all 0.15s',
+                background: activeProvider === p ? (p === 'twilio' ? 'linear-gradient(135deg,#e11d48,#be123c)' : 'linear-gradient(135deg,#7c3aed,#6d28d9)') : '#f8fafc',
+                color: activeProvider === p ? '#fff' : 'var(--gray-500)',
+                border: activeProvider === p ? 'none' : '1.5px solid var(--gray-200)',
+                boxShadow: activeProvider === p ? '0 4px 14px rgba(0,0,0,0.15)' : 'none',
+              }}
+            >
+              {p === 'twilio' ? '🔴 Twilio' : '🟣 Exotel'}
+              {activeProvider === p && <span style={{ marginLeft: 6, fontSize: 10, fontWeight: 800, background: 'rgba(255,255,255,0.25)', padding: '1px 6px', borderRadius: 6 }}>ACTIVE</span>}
+            </button>
+          ))}
+        </div>
+
+        {/* Expanded config */}
+        {ivrExpanded && (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
+
+            {/* Gemini key */}
+            <div style={{ padding: '14px 16px', background: '#fffbeb', borderRadius: 10, border: '1px solid #fde68a' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10 }}>
+                <span style={{ fontSize: 16 }}>✨</span>
+                <h4 style={{ fontFamily: 'var(--font-display)', fontWeight: 700, fontSize: 12, color: '#92400e' }}>Google Gemini API Key</h4>
+                <span style={{ fontSize: 9, fontWeight: 700, padding: '2px 6px', background: '#fef3c7', color: '#92400e', borderRadius: 6 }}>REQUIRED FOR EXOTEL</span>
+              </div>
+              <CredRow label="Gemini API Key" value={ivrCfg.geminiKey || ''} onChange={v => setIvrCfg(c => ({ ...c, geminiKey: v }))} type="password" />
+            </div>
+
+            {/* Twilio config */}
+            <div style={{ padding: '14px 16px', background: activeProvider === 'twilio' ? '#fff1f2' : '#f8fafc', borderRadius: 10, border: `1.5px solid ${activeProvider === 'twilio' ? '#fda4af' : 'var(--gray-200)'}` }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 12 }}>
+                <span style={{ fontSize: 16 }}>🔴</span>
+                <h4 style={{ fontFamily: 'var(--font-display)', fontWeight: 700, fontSize: 12, color: '#9f1239' }}>Twilio Configuration</h4>
+                {activeProvider === 'twilio' && <span style={{ fontSize: 9, fontWeight: 800, padding: '2px 6px', background: '#e11d48', color: '#fff', borderRadius: 6 }}>ACTIVE</span>}
+              </div>
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+                <CredRow label="Account SID"   value={ivrCfg.twilio.accountSid  || ''} onChange={v => updateTwilio('accountSid', v)} />
+                <CredRow label="Auth Token"    value={ivrCfg.twilio.authToken   || ''} onChange={v => updateTwilio('authToken', v)}   type="password" />
+                <CredRow label="API Key SID"   value={ivrCfg.twilio.apiKeySid  || ''} onChange={v => updateTwilio('apiKeySid', v)} />
+                <CredRow label="API Secret"    value={ivrCfg.twilio.apiSecret  || ''} onChange={v => updateTwilio('apiSecret', v)}    type="password" />
+                <CredRow label="Phone Number"  value={ivrCfg.twilio.phoneNumber || ''} onChange={v => updateTwilio('phoneNumber', v)} mono={false} />
+              </div>
+            </div>
+
+            {/* Exotel config */}
+            <div style={{ padding: '14px 16px', background: activeProvider === 'exotel' ? '#f5f3ff' : '#f8fafc', borderRadius: 10, border: `1.5px solid ${activeProvider === 'exotel' ? '#c4b5fd' : 'var(--gray-200)'}` }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 12 }}>
+                <span style={{ fontSize: 16 }}>🟣</span>
+                <h4 style={{ fontFamily: 'var(--font-display)', fontWeight: 700, fontSize: 12, color: '#5b21b6' }}>Exotel Configuration</h4>
+                {activeProvider === 'exotel' && <span style={{ fontSize: 9, fontWeight: 800, padding: '2px 6px', background: '#7c3aed', color: '#fff', borderRadius: 6 }}>ACTIVE</span>}
+              </div>
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+                <CredRow label="Account SID"  value={ivrCfg.exotel.accountSid || ''} onChange={v => updateExotel('accountSid', v)} />
+                <CredRow label="Subdomain"    value={ivrCfg.exotel.subdomain  || ''} onChange={v => updateExotel('subdomain', v)}   mono={false} />
+                <CredRow label="API Key"      value={ivrCfg.exotel.apiKey     || ''} onChange={v => updateExotel('apiKey', v)}     type="password" />
+                <CredRow label="API Token"    value={ivrCfg.exotel.apiToken   || ''} onChange={v => updateExotel('apiToken', v)}   type="password" />
+                <CredRow label="Exophone (Virtual Number)" value={ivrCfg.exotel.exophone || ''} onChange={v => updateExotel('exophone', v)} mono={false} />
+              </div>
+              {!ivrCfg.exotel.exophone && (
+                <p style={{ marginTop: 8, fontSize: 10, color: '#7c3aed', background: '#ede9fe', padding: '5px 8px', borderRadius: 6 }}>
+                  ⚠️ Add your Exotel virtual number (Exophone) to enable outbound calls.
+                </p>
+              )}
+            </div>
+
+            {/* Save button */}
+            <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+              <button
+                onClick={saveIVR}
+                style={{ padding: '10px 24px', borderRadius: 10, background: 'linear-gradient(135deg,#1e5fb5,#2979d8)', color: '#fff', border: 'none', fontSize: 13, fontWeight: 700, cursor: 'pointer', fontFamily: 'var(--font-body)', boxShadow: '0 4px 14px rgba(30,95,181,0.3)' }}
+              >
+                💾 Save IVR Configuration
+              </button>
+              {ivrStatus && (
+                <span style={{ fontSize: 12, fontWeight: 600, color: ivrStatus.type === 'success' ? '#065f46' : '#991b1b' }}>
+                  {ivrStatus.text}
+                </span>
+              )}
+            </div>
+
+            <p style={{ fontSize: 10, color: 'var(--gray-400)', lineHeight: 1.6 }}>
+              Active provider is used when initiating IVR calls from the Chat page. Credentials are stored locally in your browser.
+              Twilio uses built-in speech recognition. Exotel uses Gemini for audio transcription.
+            </p>
+          </div>
+        )}
+      </Card>
     </Layout>
   );
 };

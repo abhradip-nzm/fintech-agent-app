@@ -17,8 +17,45 @@ const LS_BIN_ID      = 'agently_bin_id';
 const LS_API_KEY     = 'agently_jsonbin_key';
 const LS_INDUSTRIES  = 'agently_industries_v1';
 const LS_WHAPI_TOKEN = 'agently_whapi_token';
+const LS_IVR_CONFIG  = 'agently_ivr_config';
 
 const DEFAULT_WHAPI_TOKEN = 'XfKaJqDlYaChylDuIiMDbrKgMBV8KjaB';
+
+// ─── IVR Config defaults ──────────────────────────────────────────────────────
+// Credentials are intentionally blank here — enter them via the
+// Smart Engagement Dashboard → IVR Voice Configuration panel.
+export const DEFAULT_IVR_CONFIG = {
+  activeProvider: 'twilio',   // 'twilio' | 'exotel'
+  geminiKey: '',
+  twilio: {
+    accountSid:  '',
+    authToken:   '',
+    apiKeySid:   '',
+    apiSecret:   '',
+    phoneNumber: '',
+  },
+  exotel: {
+    accountSid: '',
+    apiKey:     '',
+    apiToken:   '',
+    subdomain:  'api.exotel.com',
+    exophone:   '',
+  },
+};
+
+/** Read IVR configuration from localStorage. */
+export const readIVRConfig = () => {
+  try {
+    const stored = localStorage.getItem(LS_IVR_CONFIG);
+    if (!stored) return DEFAULT_IVR_CONFIG;
+    return { ...DEFAULT_IVR_CONFIG, ...JSON.parse(stored) };
+  } catch { return DEFAULT_IVR_CONFIG; }
+};
+
+/** Write IVR configuration to localStorage. */
+export const writeIVRConfig = (config) => {
+  localStorage.setItem(LS_IVR_CONFIG, JSON.stringify(config));
+};
 
 /** Read the Whapi API token — falls back to the factory default. */
 export const readWhapiToken = () =>
