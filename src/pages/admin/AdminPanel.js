@@ -4,6 +4,7 @@ import {
   readAgents, writeAgents,
   readIndustries, writeIndustries,
   getApiKey, setApiKey, getBinId, isCloudConnected, clearCloudConfig,
+  readIVRConfig, readWhapiToken,
 } from '../../utils/storage';
 
 // ─── Rich Text Editor ─────────────────────────────────────────────────────────
@@ -186,6 +187,10 @@ const AdminPanel = () => {
   const [showCloud, setShowCloud]     = useState(false);
   const [apiKeyInput, setApiKeyInput] = useState('');
   const [cloudStatus, setCloudStatus] = useState(null);
+
+  // ── Credentials ──
+  const [copiedKey, setCopiedKey]     = useState(null);
+  const [showSecrets, setShowSecrets] = useState({});
 
   const connected = isCloudConnected();
 
@@ -372,8 +377,9 @@ const AdminPanel = () => {
           {/* Tab bar */}
           <div style={{ display: 'flex', padding: '10px 10px 0', gap: 4 }}>
             {[
-              { key: 'agents',     label: '📋 Agent Cards' },
-              { key: 'industries', label: '🏭 Industries' },
+              { key: 'agents',      label: '📋 Agents' },
+              { key: 'industries',  label: '🏭 Industries' },
+              { key: 'credentials', label: '🔑 Credentials' },
             ].map(tab => (
               <button
                 key={tab.key}
@@ -488,6 +494,104 @@ const AdminPanel = () => {
 
         {/* ── Right Panel ── */}
         <div style={{ flex: 1, overflowY: 'auto', padding: '28px 32px' }}>
+
+          {/* ── Credentials Panel ── */}
+          {activeMenu === 'credentials' && (() => {
+            const ivr = readIVRConfig();
+            const whapiToken = readWhapiToken();
+            const jsonbinKey = getApiKey();
+            const jsonbinBin = getBinId();
+
+            const copyToClipboard = (id, value) => {
+              if (!value) return;
+              navigator.clipboard.writeText(value).then(() => {
+                setCopiedKey(id);
+                setTimeout(() => setCopiedKey(null), 2000);
+              });
+            };
+
+            const toggleSecret = (id) => setShowSecrets(s => ({ ...s, [id]: !s[id] }));
+
+            const CredRow = ({ id, label, value, secret = true }) => {
+              const isVisible = !secret || showSecrets[id];
+              const isEmpty = !value;
+              return (
+                <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '10px 0', borderBottom: '1px solid #f1f5f9' }}>
+                  <div style={{ minWidth: 180 }}>
+                    <p style={{ fontSize: 10, fontWeight: 700, color: '#94a3b8', textTransform: 'uppercase', letterSpacing: '0.07em' }}>{label}</p>
+                  </div>
+                  <div style={{ flex: 1, fontFamily: 'monospace', fontSize: 12, color: isEmpty ? '#cbd5e1' : '#0f172a', background: '#f8fafc', padding: '6px 10px', borderRadius: 6, border: '1px solid #e2e8f0', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', minWidth: 0 }}>
+                    {isEmpty ? '— not set —' : isVisible ? value : '•'.repeat(Math.min(value.length, 28))}
+                  </div>
+                  {secret && !isEmpty && (
+                    <button
+                      onClick={() => toggleSecret(id)}
+                      title={isVisible ? 'Hide' : 'Show'}
+                      style={{ width: 30, height: 30, borderRadius: 6, border: '1px solid #e2e8f0', background: '#f8fafc', cursor: 'pointer', fontSize: 14, display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}
+                    >
+                      {isVisible ? '🙈' : '👁'}
+                    </button>
+                  )}
+                  <button
+                    onClick={() => copyToClipboard(id, value)}
+                    disabled={isEmpty}
+                    title="Copy"
+                    style={{ width: 30, height: 30, borderRadius: 6, border: `1px solid ${copiedKey === id ? '#10b981' : '#e2e8f0'}`, background: copiedKey === id ? '#d1fae5' : '#f8fafc', cursor: isEmpty ? 'not-allowed' : 'pointer', fontSize: 12, display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0, opacity: isEmpty ? 0.4 : 1, transition: 'all 0.2s' }}
+                  >
+                    {copiedKey === id ? '✓' : '⧉'}
+                  </button>
+                </div>
+              );
+            };
+
+            const Section = ({ title, color, children }) => (
+              <div style={{ background: '#fff', borderRadius: 16, padding: '20px 24px', border: '1px solid #e2e8f0', boxShadow: '0 2px 12px rgba(0,0,0,0.04)', marginBottom: 20 }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 14 }}>
+                  <div style={{ width: 4, height: 18, borderRadius: 2, background: color }} />
+                  <h3 style={{ fontSize: 13, fontWeight: 700, color: '#0f172a', fontFamily: 'Plus Jakarta Sans, sans-serif' }}>{title}</h3>
+                </div>
+                {children}
+              </div>
+            );
+
+            return (
+              <div style={{ maxWidth: 860 }}>
+                <div style={{ marginBottom: 24 }}>
+                  <h2 style={{ fontSize: 18, fontWeight: 700, color: '#0f172a', fontFamily: 'Plus Jakarta Sans, sans-serif' }}>Credentials & Config</h2>
+                  <p style={{ fontSize: 12, color: '#94a3b8', marginTop: 4 }}>All stored API keys, tokens and configuration variables. Click 👁 to reveal, ⧉ to copy.</p>
+                </div>
+
+                <Section title="Twilio — Voice / IVR" color="#e2231a">
+                  <CredRow id="twilio_sid"    label="Account SID"   value={ivr.twilio?.accountSid}  />
+                  <CredRow id="twilio_auth"   label="Auth Token"    value={ivr.twilio?.authToken}   />
+                  <CredRow id="twilio_keyid"  label="API Key SID"   value={ivr.twilio?.apiKeySid}   />
+                  <CredRow id="twilio_secret" label="API Secret"    value={ivr.twilio?.apiSecret}   />
+                  <CredRow id="twilio_phone"  label="Phone Number"  value={ivr.twilio?.phoneNumber}  secret={false} />
+                </Section>
+
+                <Section title="Exotel — Voice / IVR" color="#00b4d8">
+                  <CredRow id="exotel_sid"       label="Account SID"  value={ivr.exotel?.accountSid}  />
+                  <CredRow id="exotel_apikey"    label="API Key"      value={ivr.exotel?.apiKey}      />
+                  <CredRow id="exotel_apitoken"  label="API Token"    value={ivr.exotel?.apiToken}    />
+                  <CredRow id="exotel_subdomain" label="Subdomain"    value={ivr.exotel?.subdomain}    secret={false} />
+                  <CredRow id="exotel_exophone"  label="Exophone"     value={ivr.exotel?.exophone}     secret={false} />
+                </Section>
+
+                <Section title="Google Gemini" color="#4285f4">
+                  <CredRow id="gemini_key" label="API Key" value={ivr.geminiKey} />
+                </Section>
+
+                <Section title="WhatsApp (Whapi)" color="#25d366">
+                  <CredRow id="whapi_token" label="Token" value={whapiToken} />
+                </Section>
+
+                <Section title="JSONBin Cloud Storage" color="#7c3aed">
+                  <CredRow id="jsonbin_key"   label="Master Key" value={jsonbinKey} />
+                  <CredRow id="jsonbin_binid" label="Bin ID"     value={jsonbinBin} secret={false} />
+                </Section>
+              </div>
+            );
+          })()}
 
           {/* ── Industries Management Panel ── */}
           {activeMenu === 'industries' && (

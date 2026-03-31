@@ -77,32 +77,32 @@ function buildActionUrl(base, params) {
 // ── Append transcript (parallel, max 3 s so we never block TwiML response) ───
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
-async function appendTranscript(callSid, speaker, text, extraFields = {}) {
-  try {
-    const store   = getIVRStore();
-    const session = await store.get(`call-${callSid}`, { type: 'json' });
-    if (!session) return;
-    const entry = { speaker, text, timestamp: new Date().toISOString() };
-    await store.setJSON(`call-${callSid}`, {
-      ...session,
-      ...extraFields,
-      entries: [...(session.entries || []), entry],
-    });
-  } catch (e) {
-    console.error('[ivr-twilio] appendTranscript error:', e.message);
-  }
-}
-
-/** Fire multiple transcript writes in parallel; cap total wait at 3 s. */
+/** Batch-append all transcript entries in ONE read→write to avoid race conditions. */
 async function logTranscript(...tasks) {
+  if (!tasks.length) return;
+  const callSid = tasks[0][0];
   try {
     await Promise.race([
-      Promise.all(tasks.map(([sid, speaker, text, extra]) =>
-        appendTranscript(sid, speaker, text, extra)
-      )),
+      (async () => {
+        const store   = getIVRStore();
+        const session = await store.get(`call-${callSid}`, { type: 'json' });
+        if (!session) return;
+        let extraFields = {};
+        const newEntries = tasks.map(([, speaker, text, xFields = {}]) => {
+          Object.assign(extraFields, xFields);
+          return { speaker, text, timestamp: new Date().toISOString() };
+        });
+        await store.setJSON(`call-${callSid}`, {
+          ...session,
+          ...extraFields,
+          entries: [...(session.entries || []), ...newEntries],
+        });
+      })(),
       sleep(3000),
     ]);
-  } catch (_) {}
+  } catch (e) {
+    console.error('[ivr-twilio] logTranscript error:', e.message);
+  }
 }
 
 // ── Main handler ───────────────────────────────────────────────────────────

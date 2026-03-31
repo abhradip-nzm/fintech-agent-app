@@ -10,10 +10,23 @@ import { STATUS_META } from '../../../data/agentsData';
 import { readIVRConfig } from '../../../utils/storage';
 
 // ─── Message bubble ───────────────────────────────────────────────────────────
-const MessageBubble = ({ msg }) => {
+const MessageBubble = ({ msg, onTranslate, translated, translating }) => {
   const isBot      = msg.sender === 'ai_bot';
   const isHuman    = msg.sender === 'human_agent';
   const isCustomer = msg.sender === 'customer';
+  const nonEng     = /[^\x00-\x7F]/.test(msg.message);
+
+  const TranslateBtn = () => nonEng && !translated ? (
+    <button
+      onClick={() => onTranslate && onTranslate(`w_${msg.id}`, msg.message)}
+      disabled={translating}
+      style={{ fontSize: 9, fontWeight: 700, padding: '1px 7px', borderRadius: 8,
+        background: translating ? '#f3f4f6' : '#ede9fe', color: translating ? '#9ca3af' : '#6d28d9',
+        border: '1px solid #ddd6fe', cursor: translating ? 'wait' : 'pointer',
+        fontFamily: 'var(--font-body)', marginTop: 3, display: 'inline-block' }}>
+      {translating ? '…' : '🌐 Translate'}
+    </button>
+  ) : null;
 
   if (isCustomer) {
     return (
@@ -21,7 +34,9 @@ const MessageBubble = ({ msg }) => {
         <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 3, maxWidth: '72%' }}>
           <div style={{ background: 'linear-gradient(135deg, #25D366, #128C7E)', color: '#fff', padding: '10px 14px', borderRadius: '18px 18px 4px 18px', fontSize: 13.5, lineHeight: 1.55 }}>
             <p style={{ whiteSpace: 'pre-wrap', margin: 0 }}>{msg.message}</p>
+            {translated && <p style={{ margin: '6px 0 0', fontSize: 11, color: 'rgba(255,255,255,0.85)', borderTop: '1px dashed rgba(255,255,255,0.3)', paddingTop: 5, fontStyle: 'italic' }}>🌐 {translated}</p>}
           </div>
+          <TranslateBtn />
           <span style={{ fontSize: 10, color: 'var(--gray-400)' }}>
             {new Date(msg.timestamp).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' })} · WhatsApp
             {msg.source === 'whatsapp_live' && <span style={{ marginLeft: 4, color: '#25D366', fontWeight: 700 }}>● Live</span>}
@@ -41,7 +56,9 @@ const MessageBubble = ({ msg }) => {
         <span style={{ fontSize: 10, fontWeight: 700, color: isBot ? '#1e40af' : '#5b21b6', marginLeft: 2 }}>{msg.senderName}</span>
         <div style={{ background: isBot ? '#f0f7ff' : '#f5f3ff', border: `1px solid ${isBot ? '#bfdbfe' : '#ddd6fe'}`, padding: '10px 14px', borderRadius: '18px 18px 18px 4px', fontSize: 13.5, lineHeight: 1.55, color: 'var(--gray-800)' }}>
           <p style={{ whiteSpace: 'pre-wrap', margin: 0 }}>{msg.message}</p>
+          {translated && <p style={{ margin: '6px 0 0', fontSize: 11, color: '#6d28d9', borderTop: '1px dashed #ddd6fe', paddingTop: 5, fontStyle: 'italic' }}>🌐 {translated}</p>}
         </div>
+        <TranslateBtn />
         <span style={{ fontSize: 10, color: 'var(--gray-400)', marginLeft: 2 }}>
           {new Date(msg.timestamp).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' })}
           {isBot && ' · AI Bot'}{isHuman && ' · Human Agent'}
@@ -183,8 +200,10 @@ const ChatPage = () => {
   const [ivrProvider,      setIvrProvider]      = useState('');
   const [showIvrPanel,     setShowIvrPanel]     = useState(false);
   const [ivrError,         setIvrError]         = useState(null);
-  const [translatedEntries,setTranslatedEntries]= useState({});
-  const [translatingIdx,   setTranslatingIdx]   = useState(null);
+  const [translatedMap,    setTranslatedMap]     = useState({});  // key → translated text
+  const translatedMapRef = useRef({});  // always-current mirror for download closure
+  const [translatingKey,   setTranslatingKey]    = useState(null);
+  const [ivrHistory,       setIvrHistory]        = useState([]);  // frozen past IVR sessions
   const [initMode,         setInitMode]         = useState('bot'); // 'bot'|'ivr'|'human' — used in empty panel
   const ivrPollRef = useRef(null);
 
@@ -231,14 +250,6 @@ const ChatPage = () => {
     }
     prevMsgCountRef.current = messages.length;
   }, [messages]); // eslint-disable-line
-
-  // ── Auto-poll ────────────────────────────────────────────────────────────────
-  useEffect(() => {
-    if (polling && customer) {
-      pollIntervalRef.current = setInterval(() => doFetchReplies(false), 12000);
-    }
-    return () => clearInterval(pollIntervalRef.current);
-  }, [polling, customer, messages]); // eslint-disable-line
 
   useEffect(() => () => clearInterval(pollIntervalRef.current), []);
 
@@ -293,6 +304,14 @@ const ChatPage = () => {
     }
     if (showToast) setFetchingReplies(false);
   }, [customer, customerId, sendMessage]);
+
+  // ── Auto-poll (must be after doFetchReplies to avoid TDZ) ───────────────────
+  useEffect(() => {
+    if (polling && customer) {
+      pollIntervalRef.current = setInterval(() => doFetchReplies(false), 12000);
+    }
+    return () => clearInterval(pollIntervalRef.current);
+  }, [polling, customer, doFetchReplies]); // eslint-disable-line
 
   // ── Initiate bot conversation ────────────────────────────────────────────────
   const handleInitiateBot = async () => {
@@ -370,6 +389,7 @@ const ChatPage = () => {
     assignAgent(customerId, agentId);
     setShowAgentPicker(false);
     playAssignTone();
+    setPolling(true); // ensure customer replies auto-sync in human mode
     const agent = humanAgents.find(a => a.id === agentId);
     if (agent) {
       const joinMsg = `Hi ${customer?.name}! I'm ${agent.name} from the ${agent.role} team. I've taken over your case and I'm here to help you personally. Let me review the conversation and assist you right away!`;
@@ -382,7 +402,8 @@ const ChatPage = () => {
 
   const handleReleaseAgent = () => {
     releaseAgent(customerId);
-    setTriageState(customerId, { issueType, state: getTriageState(customerId)?.state || 'awaiting_issue' });
+    // Always restart bot with a fresh greeting so the triage flow begins cleanly
+    handleInitiateBot();
   };
 
   // ── Simulate customer reply ───────────────────────────────────────────────────
@@ -426,7 +447,6 @@ const ChatPage = () => {
     setIvrError(null);
     setIvrStatus('initiating');
     setIvrTranscript([]);
-    setTranslatedEntries({});
     setIvrProvider(provider);
     try {
       const res = await fetch('/.netlify/functions/initiate-call', {
@@ -466,23 +486,31 @@ const ChatPage = () => {
     addNotification({ type: 'bot_initiated', customerId, customerName: customer.name, message: 'IVR call transferred to WhatsApp chat' });
   }, [ivrTranscript, customerId, customer, sendMessage, addNotification]);
 
-  // ── IVR: translate a transcript entry via Gemini ────────────────────────────
-  const handleTranslateEntry = useCallback(async (index, text) => {
-    setTranslatingIdx(index);
+  // ── Unified translate (IVR entries, WhatsApp messages) ──────────────────────
+  const handleTranslate = useCallback(async (key, text) => {
+    setTranslatingKey(key);
     try {
-      const cfg = readIVRConfig();
-      const key = cfg.geminiKey;
-      if (!key) { setTranslatedEntries(p => ({ ...p, [index]: '(no Gemini key configured)' })); return; }
-      const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${key}`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ contents: [{ parts: [{ text: `Translate the following text to English. Return only the translation:\n\n${text}` }] }] }),
-      });
+      // Detect script to pick a valid MyMemory source language
+      const detectLang = (t) => {
+        if (/[\u0900-\u097F]/.test(t)) return 'hi';   // Devanagari (Hindi)
+        if (/[\u0980-\u09FF]/.test(t)) return 'bn';   // Bengali
+        if (/[\u0B80-\u0BFF]/.test(t)) return 'ta';   // Tamil
+        if (/[\u0C00-\u0C7F]/.test(t)) return 'te';   // Telugu
+        if (/[\u0600-\u06FF]/.test(t)) return 'ar';   // Arabic
+        if (/[\u4E00-\u9FFF]/.test(t)) return 'zh-CN';// Chinese
+        if (/[\u3040-\u30FF]/.test(t)) return 'ja';   // Japanese
+        if (/[\uAC00-\uD7AF]/.test(t)) return 'ko';   // Korean
+        return 'hi'; // default for this app
+      };
+      const srcLang = detectLang(text);
+      const res = await fetch(
+        `https://api.mymemory.translated.net/get?q=${encodeURIComponent(text)}&langpair=${srcLang}|en`
+      );
       const data = await res.json();
-      const translated = data.candidates?.[0]?.content?.parts?.[0]?.text?.trim() || '(translation unavailable)';
-      setTranslatedEntries(p => ({ ...p, [index]: translated }));
-    } catch { setTranslatedEntries(p => ({ ...p, [index]: '(translation failed)' })); }
-    finally { setTranslatingIdx(null); }
+      const translated = data.responseData?.translatedText || '(translation unavailable)';
+      setTranslatedMap(p => { const n = { ...p, [key]: translated }; translatedMapRef.current = n; return n; });
+    } catch { setTranslatedMap(p => { const n = { ...p, [key]: '(translation failed)' }; translatedMapRef.current = n; return n; }); }
+    finally { setTranslatingKey(null); }
   }, []);
 
   // ── Download full chat history ───────────────────────────────────────────────
@@ -547,20 +575,42 @@ const ChatPage = () => {
           : m.sender === 'ai_bot'
             ? 'Agently AI Bot'
             : (m.senderName || 'Human Agent');
-        txt += `[${t}] ${who}:\n${m.message}\n\n`;
+        txt += `[${t}] ${who}:\n${m.message}\n`;
+        const tkMsg = translatedMapRef.current[`w_${m.id}`];
+        if (tkMsg) txt += `  [Translated EN] ${tkMsg}\n`;
+        txt += '\n';
       });
     } else {
       txt += `WHATSAPP CONVERSATION\n${hr}\n(No WhatsApp messages recorded)\n\n`;
     }
 
-    // ── IVR Voice Call ──
+    // ── IVR History (past sessions that were transitioned away from) ──
+    ivrHistory.forEach((session, si) => {
+      const providerLabel = session.provider ? session.provider.toUpperCase() : 'IVR';
+      txt += `IVR VOICE CALL (Session ${si + 1}) — ${providerLabel}\n${hr}\n`;
+      if (session.callSid) txt += `Call ID       : ${session.callSid}\n`;
+      txt += `Status        : ${session.status || 'unknown'}\n`;
+      if (session.entries?.[0]?.timestamp)
+        txt += `Started       : ${new Date(session.entries[0].timestamp).toLocaleString('en-IN')}\n`;
+      txt += '\n';
+      (session.entries || []).filter(e => e.speaker !== 'system').forEach((e, ei) => {
+        const t   = e.timestamp ? new Date(e.timestamp).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: true }) : '--:--';
+        const who = e.speaker === 'bot' ? 'IVR Bot' : customer.name;
+        txt += `[${t}] ${who}:\n  ${e.text}\n`;
+        const tkHistory = translatedMapRef.current[`h${si}_${ei}`];
+        if (tkHistory) txt += `  [Translated EN] ${tkHistory}\n`;
+        txt += '\n';
+      });
+    });
+
+    // ── IVR Voice Call (active/current session) ──
     if (freshIvrEntries.length > 0 || sidToFetch) {
       const providerLabel = ivrProvider ? ivrProvider.toUpperCase() : 'IVR';
       txt += `IVR VOICE CALL — ${providerLabel}\n${hr}\n`;
       if (sidToFetch)    txt += `Call ID       : ${sidToFetch}\n`;
       if (freshIvrStatus) txt += `Status        : ${freshIvrStatus}\n`;
-      if (ivrTranscript[0]?.timestamp || freshIvrEntries[0]?.timestamp)
-        txt += `Started       : ${new Date(freshIvrEntries[0]?.timestamp).toLocaleString('en-IN')}\n`;
+      if (freshIvrEntries[0]?.timestamp)
+        txt += `Started       : ${new Date(freshIvrEntries[0].timestamp).toLocaleString('en-IN')}\n`;
       txt += '\n';
 
       if (freshIvrEntries.length === 0) {
@@ -570,7 +620,8 @@ const ChatPage = () => {
           const t   = e.timestamp ? new Date(e.timestamp).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: true }) : '--:--';
           const who = e.speaker === 'bot' ? 'IVR Bot' : e.speaker === 'customer' ? customer.name : 'System';
           txt += `[${t}] ${who}:\n  ${e.text}\n`;
-          if (translatedEntries[idx]) txt += `  [Translated EN] ${translatedEntries[idx]}\n`;
+          const tkActive = translatedMapRef.current[`a_${idx}`];
+          if (tkActive) txt += `  [Translated EN] ${tkActive}\n`;
           txt += '\n';
         });
       }
@@ -589,7 +640,7 @@ const ChatPage = () => {
     document.body.removeChild(a);
     URL.revokeObjectURL(url);
     setDownloading(false);
-  }, [customer, messages, ivrTranscript, ivrProvider, ivrStatus, ivrCallSid, translatedEntries, openIssues]);
+  }, [customer, messages, ivrHistory, ivrTranscript, ivrProvider, ivrStatus, ivrCallSid, openIssues]);
 
   // ── Phone edit ───────────────────────────────────────────────────────────────
   const handleSavePhone = () => {
@@ -879,15 +930,66 @@ const ChatPage = () => {
               </span>
             </div>
 
+            {/* IVR history sessions (past calls that were transitioned away from) */}
+            {ivrHistory.map((session, si) => (
+              <div key={session.callSid || si}>
+                <Separator label={`📞 IVR Call · ${(session.provider || 'IVR').toUpperCase()} · ${session.status === 'completed' ? '✓ Completed' : session.status === 'failed' ? '✕ Failed' : session.status || ''}`} />
+                {session.entries.filter(e => e.speaker !== 'system').map((entry, ei) => {
+                  const histKey    = `h${si}_${ei}`;
+                  const isBot      = entry.speaker === 'bot';
+                  const histTrans  = translatedMap[histKey];
+                  const histTling  = translatingKey === histKey;
+                  const histNonEng = /[^\x00-\x7F]/.test(entry.text);
+                  return (
+                    <div key={ei} style={{ display: 'flex', flexDirection: isBot ? 'row' : 'row-reverse', gap: 8, alignItems: 'flex-start', marginBottom: 10 }}>
+                      <div style={{ width: 26, height: 26, borderRadius: '50%', background: isBot ? '#fee2e2' : '#dcfce7', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 12, flexShrink: 0, marginTop: 2 }}>
+                        {isBot ? '📞' : '🎙️'}
+                      </div>
+                      <div style={{ maxWidth: '72%', display: 'flex', flexDirection: 'column', gap: 3, alignItems: isBot ? 'flex-start' : 'flex-end' }}>
+                        <span style={{ fontSize: 9, fontWeight: 700, color: isBot ? '#b91c1c' : '#15803d' }}>{isBot ? 'IVR Bot' : customer.name}</span>
+                        <div style={{ background: isBot ? '#fff1f2' : '#f0fdf4', border: `1px solid ${isBot ? '#fecaca' : '#bbf7d0'}`, borderRadius: isBot ? '16px 16px 16px 4px' : '16px 16px 4px 16px', padding: '8px 12px', fontSize: 13, color: 'var(--gray-800)', lineHeight: 1.5 }}>
+                          <p style={{ margin: 0 }}>{entry.text}</p>
+                          {histTrans && <p style={{ margin: '6px 0 0', fontSize: 11, color: '#6d28d9', borderTop: '1px dashed #ddd6fe', paddingTop: 5, fontStyle: 'italic' }}>🌐 {histTrans}</p>}
+                        </div>
+                        {histNonEng && !histTrans && (
+                          <button onClick={() => handleTranslate(histKey, entry.text)} disabled={histTling}
+                            style={{ fontSize: 9, fontWeight: 700, padding: '1px 7px', borderRadius: 8, background: histTling ? '#f3f4f6' : '#ede9fe', color: histTling ? '#9ca3af' : '#6d28d9', border: '1px solid #ddd6fe', cursor: histTling ? 'wait' : 'pointer', fontFamily: 'var(--font-body)' }}>
+                            {histTling ? '…' : '🌐 Translate'}
+                          </button>
+                        )}
+                        <span style={{ fontSize: 9, color: 'var(--gray-400)' }}>{entry.timestamp ? new Date(entry.timestamp).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' }) : ''}</span>
+                      </div>
+                    </div>
+                  );
+                })}
+                <Separator label={`— IVR Call Ended —`} />
+              </div>
+            ))}
+
             {hasPastConvo && (
               <>
-                <Separator label="Past Conversation" />
-                {messages.map(msg => <MessageBubble key={msg.id} msg={msg} />)}
-                <Separator label="Live Session" />
+                <Separator label="Conversation" />
+                {messages.map(msg => (
+                  <MessageBubble
+                    key={msg.id}
+                    msg={msg}
+                    onTranslate={handleTranslate}
+                    translated={translatedMap[`w_${msg.id}`]}
+                    translating={translatingKey === `w_${msg.id}`}
+                  />
+                ))}
               </>
             )}
 
-            {!hasPastConvo && messages.length > 0 && messages.map(msg => <MessageBubble key={msg.id} msg={msg} />)}
+            {!hasPastConvo && messages.length > 0 && messages.map(msg => (
+              <MessageBubble
+                key={msg.id}
+                msg={msg}
+                onTranslate={handleTranslate}
+                translated={translatedMap[`w_${msg.id}`]}
+                translating={translatingKey === `w_${msg.id}`}
+              />
+            ))}
 
             {botTyping && (
               <div style={{ display: 'flex', gap: 8, alignItems: 'flex-end', marginBottom: 12 }}>
@@ -901,7 +1003,7 @@ const ChatPage = () => {
             )}
 
             {/* ── Initiate bot panel ── */}
-            {!hasPastConvo && messages.length === 0 && !botTyping && (
+            {!hasPastConvo && messages.length === 0 && !botTyping && !ivrCallSid && (
               <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '30px 24px', minHeight: '45%' }}>
                 <div style={{ background: '#fff', border: '1px solid var(--gray-200)', borderRadius: 20, padding: '32px 28px', maxWidth: 440, width: '100%', textAlign: 'center', boxShadow: '0 4px 24px rgba(0,0,0,0.06)' }}>
                   <div style={{ width: 68, height: 68, borderRadius: 20, background: 'linear-gradient(135deg, #dbeafe, #ede9fe)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 30, margin: '0 auto 18px' }}>🤖</div>
@@ -979,12 +1081,13 @@ const ChatPage = () => {
                 )}
 
                 {ivrTranscript.map((entry, idx) => {
-                  const isBot      = entry.speaker === 'bot';
-                  const isCust     = entry.speaker === 'customer';
-                  const isSystem   = entry.speaker === 'system';
-                  const hasHindi   = /[\u0900-\u097F]/.test(entry.text);
-                  const translated = translatedEntries[idx];
-                  const isTranslating = translatingIdx === idx;
+                  const isBot         = entry.speaker === 'bot';
+                  const isCust        = entry.speaker === 'customer';
+                  const isSystem      = entry.speaker === 'system';
+                  const nonEng        = /[^\x00-\x7F]/.test(entry.text);
+                  const activeKey     = `a_${idx}`;
+                  const translated    = translatedMap[activeKey];
+                  const isTranslating = translatingKey === activeKey;
 
                   if (isSystem) return (
                     <div key={idx} style={{ textAlign: 'center', margin: '6px 0' }}>
@@ -1013,8 +1116,8 @@ const ChatPage = () => {
                           <span style={{ fontSize: 9, color: 'var(--gray-400)' }}>
                             {entry.timestamp ? new Date(entry.timestamp).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' }) : ''}
                           </span>
-                          {hasHindi && !translated && (
-                            <button onClick={() => handleTranslateEntry(idx, entry.text)} disabled={isTranslating} style={{ fontSize: 9, fontWeight: 700, padding: '1px 7px', borderRadius: 8, background: isTranslating ? '#f3f4f6' : '#ede9fe', color: isTranslating ? '#9ca3af' : '#6d28d9', border: '1px solid #ddd6fe', cursor: isTranslating ? 'wait' : 'pointer', fontFamily: 'var(--font-body)' }}>
+                          {nonEng && !translated && (
+                            <button onClick={() => handleTranslate(activeKey, entry.text)} disabled={isTranslating} style={{ fontSize: 9, fontWeight: 700, padding: '1px 7px', borderRadius: 8, background: isTranslating ? '#f3f4f6' : '#ede9fe', color: isTranslating ? '#9ca3af' : '#6d28d9', border: '1px solid #ddd6fe', cursor: isTranslating ? 'wait' : 'pointer', fontFamily: 'var(--font-body)' }}>
                               {isTranslating ? '…' : '🌐 Translate'}
                             </button>
                           )}
@@ -1041,15 +1144,23 @@ const ChatPage = () => {
                       </span>
                     </div>
                     <div style={{ display: 'flex', gap: 8, justifyContent: 'center', flexWrap: 'wrap' }}>
-                      <button onClick={() => { setIvrCallSid(null); setIvrTranscript([]); setIvrStatus(null); setIvrError(null); setTranslatedEntries({}); handleInitiateIVR(); }}
+                      <button onClick={() => { setIvrCallSid(null); setIvrTranscript([]); setIvrStatus(null); setIvrError(null); handleInitiateIVR(); }}
                         style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '9px 16px', borderRadius: 10, fontSize: 12, fontWeight: 700, background: 'linear-gradient(135deg,#dc2626,#b91c1c)', color: '#fff', border: 'none', cursor: 'pointer', fontFamily: 'var(--font-body)', boxShadow: '0 2px 8px rgba(220,38,38,0.3)' }}>
                         📞 IVR Again
                       </button>
-                      <button onClick={handleInitiateBot}
+                      <button onClick={() => {
+                          if (ivrTranscript.length > 0) setIvrHistory(prev => [...prev, { callSid: ivrCallSid, provider: ivrProvider, status: ivrStatus, entries: ivrTranscript }]);
+                          setIvrCallSid(null); setIvrTranscript([]); setIvrStatus(null); setIvrError(null);
+                          handleInitiateBot();
+                        }}
                         style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '9px 16px', borderRadius: 10, fontSize: 12, fontWeight: 700, background: 'linear-gradient(135deg,#1e5fb5,#2979d8)', color: '#fff', border: 'none', cursor: 'pointer', fontFamily: 'var(--font-body)', boxShadow: '0 2px 8px rgba(30,95,181,0.3)' }}>
                         🤖 AI Bot Chat
                       </button>
-                      <button onClick={() => setShowAgentPicker(true)}
+                      <button onClick={() => {
+                          if (ivrTranscript.length > 0) setIvrHistory(prev => [...prev, { callSid: ivrCallSid, provider: ivrProvider, status: ivrStatus, entries: ivrTranscript }]);
+                          setIvrCallSid(null); setIvrTranscript([]); setIvrStatus(null); setIvrError(null);
+                          setShowAgentPicker(true);
+                        }}
                         style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '9px 16px', borderRadius: 10, fontSize: 12, fontWeight: 700, background: 'linear-gradient(135deg,#7c3aed,#6d28d9)', color: '#fff', border: 'none', cursor: 'pointer', fontFamily: 'var(--font-body)', boxShadow: '0 2px 8px rgba(124,58,237,0.3)' }}>
                         👤 Human Agent
                       </button>
