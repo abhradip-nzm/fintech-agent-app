@@ -444,19 +444,39 @@ const ChatPage = () => {
   useEffect(() => {
     if (!pendingAutoBot) return;
     setPendingAutoBot(false);
-    // Archive the completed IVR session to history so transcript is preserved
-    setIvrHistory(prev =>
-      ivrTranscript.length > 0
-        ? [...prev, { callSid: ivrCallSid, provider: ivrProvider, status: 'completed', entries: ivrTranscript }]
-        : prev
-    );
-    // Clear active IVR panel
-    setIvrCallSid(null);
-    setIvrTranscript([]);
-    setIvrStatus(null);
-    setIvrError(null);
-    // Auto-initiate AI bot greeting on WhatsApp
-    handleInitiateBot();
+
+    // Snapshot values now — before any async gaps
+    const snapSid      = ivrCallSid;
+    const snapProvider = ivrProvider;
+    const snapEntries  = ivrTranscript;
+
+    (async () => {
+      // Final server fetch to get the fully-written transcript (status_callback
+      // can arrive before the last logTranscript write completes in Blobs)
+      let finalEntries = snapEntries;
+      try {
+        const res = await fetch(`/.netlify/functions/call-transcript?callSid=${snapSid}`);
+        if (res.ok) {
+          const data = await res.json();
+          if ((data.entries || []).length > 0) finalEntries = data.entries;
+        }
+      } catch (_) {}
+
+      // Always preserve the IVR session in history so it stays visible in the chat
+      setIvrHistory(prev => [
+        ...prev,
+        { callSid: snapSid, provider: snapProvider, status: 'completed', entries: finalEntries },
+      ]);
+
+      // Clear active IVR panel
+      setIvrCallSid(null);
+      setIvrTranscript([]);
+      setIvrStatus(null);
+      setIvrError(null);
+
+      // Auto-initiate AI bot greeting on WhatsApp
+      handleInitiateBot();
+    })();
   }, [pendingAutoBot]); // eslint-disable-line
 
   // ── IVR: initiate outbound call ──────────────────────────────────────────────
@@ -1175,7 +1195,7 @@ const ChatPage = () => {
                         📞 IVR Again
                       </button>
                       <button onClick={() => {
-                          if (ivrTranscript.length > 0) setIvrHistory(prev => [...prev, { callSid: ivrCallSid, provider: ivrProvider, status: ivrStatus, entries: ivrTranscript }]);
+                          setIvrHistory(prev => [...prev, { callSid: ivrCallSid, provider: ivrProvider, status: ivrStatus, entries: ivrTranscript }]);
                           setIvrCallSid(null); setIvrTranscript([]); setIvrStatus(null); setIvrError(null);
                           handleInitiateBot();
                         }}
@@ -1183,7 +1203,7 @@ const ChatPage = () => {
                         🤖 AI Bot Chat
                       </button>
                       <button onClick={() => {
-                          if (ivrTranscript.length > 0) setIvrHistory(prev => [...prev, { callSid: ivrCallSid, provider: ivrProvider, status: ivrStatus, entries: ivrTranscript }]);
+                          setIvrHistory(prev => [...prev, { callSid: ivrCallSid, provider: ivrProvider, status: ivrStatus, entries: ivrTranscript }]);
                           setIvrCallSid(null); setIvrTranscript([]); setIvrStatus(null); setIvrError(null);
                           setShowAgentPicker(true);
                         }}
