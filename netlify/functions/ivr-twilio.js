@@ -140,22 +140,80 @@ exports.handler = async (event) => {
   // ── welcome ──────────────────────────────────────────────────────────────
   if (step === 'welcome') {
     const twilioCallSid = body.get('CallSid') || callSid;
-    const welcomeMsg = 'Welcome to FinAgent AI Support. For English press 1. Hindi ke liye 2 dabaen.';
+    const fromPhone     = body.get('From') || '';
+    const verifyMsg     = 'Welcome to FinAgent AI Support. For security, please enter the last 3 digits of your account number.';
 
-    // Await so Blobs write completes before returning TwiML (capped at 3 s)
-    await logTranscript(
-      [twilioCallSid, 'bot', welcomeMsg, { status: 'in-progress' }],
-    );
+    // Auto-create session for inbound calls (Blobs session not yet created)
+    try {
+      const store    = getIVRStore();
+      const existing = await store.get(`call-${twilioCallSid}`, { type: 'json' }).catch(() => null);
+      if (!existing) {
+        await store.setJSON(`call-${twilioCallSid}`, {
+          callSid:       twilioCallSid,
+          provider:      'twilio',
+          customerId:    null,
+          customerPhone: fromPhone,
+          direction:     'inbound',
+          status:        'in-progress',
+          language:      null,
+          issueType:     null,
+          triageState:   null,
+          entries: [
+            { speaker: 'system', text: `Inbound IVR call from ${fromPhone}`, timestamp: new Date().toISOString() },
+            { speaker: 'bot',    text: verifyMsg,                            timestamp: new Date().toISOString() },
+          ],
+          startedAt: new Date().toISOString(),
+        });
+      } else {
+        await logTranscript([twilioCallSid, 'bot', verifyMsg, { status: 'in-progress' }]);
+      }
+    } catch (e) {
+      console.error('[welcome] session init error:', e.message);
+    }
 
-    const langUrl = buildActionUrl(base, {
-      step: 'lang_selected', callSid: twilioCallSid, webhookBase: base,
+    const verifyUrl = buildActionUrl(base, {
+      step: 'verify_account', callSid: twilioCallSid, webhookBase: base,
     });
 
     const prompt = say('Welcome to FinAgent AI Support.', 'en') +
-                   say('For English, press 1. Hindi ke liye, 2 dabaen.', 'en');
+                   say('For security, please enter the last 3 digits of your account number.', 'en');
 
     return twiml(
-      gather(langUrl, 'en', prompt, { numDigits: '1', input: 'dtmf', timeout: 10 }) +
+      gather(verifyUrl, 'en', prompt, { numDigits: '3', input: 'dtmf', timeout: 15 }) +
+      say('We did not receive your input. Please call again. Goodbye.') +
+      '<Hangup/>'
+    );
+  }
+
+  // ── verify_account ────────────────────────────────────────────────────────
+  if (step === 'verify_account') {
+    const digits   = body.get('Digits') || '';
+    const num      = parseInt(digits, 10);
+    const isValid  = digits.length === 3 && !isNaN(num) && num >= 123 && num <= 399;
+
+    if (!isValid) {
+      const failMsg = 'Sorry, we could not verify your identity. The account details entered are not valid. Thank you for calling FinAgent. Goodbye.';
+      await logTranscript(
+        [callSid, 'customer', `Account verification attempt: ${digits || '(none)'}`, {}],
+        [callSid, 'bot',      failMsg, { status: 'failed' }],
+        [callSid, 'system',   'Call ended: identity verification failed', { status: 'failed' }],
+      );
+      return twiml(say(failMsg, 'en') + '<Hangup/>');
+    }
+
+    // Valid — proceed to language selection
+    const successMsg = 'Identity verified.';
+    const langMsg    = 'For English, press 1. Hindi ke liye, 2 dabaen.';
+    const langUrl    = buildActionUrl(base, { step: 'lang_selected', callSid, webhookBase: base });
+
+    await logTranscript(
+      [callSid, 'customer', `Account verified (last 3 digits: ${digits})`],
+      [callSid, 'bot',      successMsg + ' ' + langMsg],
+    );
+
+    return twiml(
+      say(successMsg, 'en') +
+      gather(langUrl, 'en', say(langMsg, 'en'), { numDigits: '1', input: 'dtmf', timeout: 10 }) +
       say('We did not receive your input. Please call again. Goodbye.') +
       '<Hangup/>'
     );

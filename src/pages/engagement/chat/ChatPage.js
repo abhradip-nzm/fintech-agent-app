@@ -204,6 +204,7 @@ const ChatPage = () => {
   const translatedMapRef = useRef({});  // always-current mirror for download closure
   const [translatingKey,   setTranslatingKey]    = useState(null);
   const [ivrHistory,       setIvrHistory]        = useState([]);  // frozen past IVR sessions
+  const [pendingAutoBot,   setPendingAutoBot]    = useState(false); // true → auto-start bot after IVR completes
   const [initMode,         setInitMode]         = useState('bot'); // 'bot'|'ivr'|'human' — used in empty panel
   const ivrPollRef = useRef(null);
 
@@ -432,11 +433,31 @@ const ChatPage = () => {
       setIvrStatus(data.status || 'in-progress');
       if (data.status === 'completed' || data.status === 'failed') {
         clearInterval(ivrPollRef.current);
+        if (data.status === 'completed') setPendingAutoBot(true);
       }
     } catch (_) {}
   }, []);
 
   useEffect(() => () => clearInterval(ivrPollRef.current), []);
+
+  // ── Auto-assign AI bot + send greeting when IVR call completes ───────────────
+  useEffect(() => {
+    if (!pendingAutoBot) return;
+    setPendingAutoBot(false);
+    // Archive the completed IVR session to history so transcript is preserved
+    setIvrHistory(prev =>
+      ivrTranscript.length > 0
+        ? [...prev, { callSid: ivrCallSid, provider: ivrProvider, status: 'completed', entries: ivrTranscript }]
+        : prev
+    );
+    // Clear active IVR panel
+    setIvrCallSid(null);
+    setIvrTranscript([]);
+    setIvrStatus(null);
+    setIvrError(null);
+    // Auto-initiate AI bot greeting on WhatsApp
+    handleInitiateBot();
+  }, [pendingAutoBot]); // eslint-disable-line
 
   // ── IVR: initiate outbound call ──────────────────────────────────────────────
   const handleInitiateIVR = useCallback(async () => {
@@ -508,8 +529,13 @@ const ChatPage = () => {
       );
       const data = await res.json();
       const translated = data.responseData?.translatedText || '(translation unavailable)';
-      setTranslatedMap(p => { const n = { ...p, [key]: translated }; translatedMapRef.current = n; return n; });
-    } catch { setTranslatedMap(p => { const n = { ...p, [key]: '(translation failed)' }; translatedMapRef.current = n; return n; }); }
+      // Update ref synchronously so download always reads the latest value
+      translatedMapRef.current = { ...translatedMapRef.current, [key]: translated };
+      setTranslatedMap({ ...translatedMapRef.current });
+    } catch {
+      translatedMapRef.current = { ...translatedMapRef.current, [key]: '(translation failed)' };
+      setTranslatedMap({ ...translatedMapRef.current });
+    }
     finally { setTranslatingKey(null); }
   }, []);
 
