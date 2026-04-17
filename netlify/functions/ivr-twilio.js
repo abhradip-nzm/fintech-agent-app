@@ -280,25 +280,43 @@ exports.handler = async (event) => {
     const speechResult = body.get('SpeechResult') || body.get('Digits') || '';
     const issueType    = issue;
     const currentState = state;
+    const retryCount   = parseInt(params.retry || '0', 10);
 
+    // ── No speech detected ──
     if (!speechResult.trim()) {
-      const retry = lang === 'hi'
+      // Second consecutive empty response — end call gracefully
+      if (retryCount >= 1) {
+        const endMsg = lang === 'hi'
+          ? 'Hum aapki awaaz sun nahi pa rahe. Kripya dobara call karein ya WhatsApp par sampark karein. Dhanyavaad.'
+          : 'We are unable to hear you. Please call again or reach us on WhatsApp. Thank you for calling.';
+        await logTranscript(
+          [callSid, 'customer', '(no audio — call ended)'],
+          [callSid, 'system',   'Call ended: repeated no-speech', { status: 'completed' }],
+        );
+        return twiml(say(endMsg, lang) + '<Hangup/>');
+      }
+      // First retry
+      const retryMsg = lang === 'hi'
         ? 'Aapki awaaz nahi suni. Kripya phir se bolein.'
         : 'We did not hear you. Please try again.';
       const retryUrl = buildActionUrl(base, {
         step: 'triage_response', lang, issue: issueType,
-        triageState: currentState, callSid, webhookBase: base,
+        triageState: currentState, callSid, webhookBase: base, retry: '1',
       });
-      await logTranscript([callSid, 'customer', '(no speech detected)'], [callSid, 'bot', retry]);
+      await logTranscript([callSid, 'customer', '(no speech detected)'], [callSid, 'bot', retryMsg]);
       return twiml(
-        say(retry, lang) +
+        say(retryMsg, lang) +
         gather(retryUrl, lang, '', { input: 'speech dtmf', timeout: 10 }) +
         '<Hangup/>'
       );
     }
 
-    const result = processIVRTriageMessage(issueType, currentState, speechResult, lang);
+    // ── Non-empty speech — run triage engine ──
+    const result       = processIVRTriageMessage(issueType, currentState, speechResult, lang);
+    const stateAdvanced = result.nextState !== currentState;
+    const newRetry      = stateAdvanced ? 0 : retryCount + 1;
 
+    // Terminal state
     if (result.isTerminal || result.nextState === 'terminal') {
       const bye = lang === 'hi'
         ? 'Dhanyavaad. Aapka din shubh ho. Alvida.'
@@ -311,10 +329,25 @@ exports.handler = async (event) => {
       return twiml(say(result.message, lang) + say(bye, lang) + '<Hangup/>');
     }
 
+    // Too many retries on same state — wrap up gracefully
+    if (newRetry >= 2) {
+      const wrapMsg = lang === 'hi'
+        ? 'Dhanyavaad. Aapki samasya note kar li gayi hai. Hamaari team aapko jald sampark karegi. Alvida.'
+        : 'Thank you. Your issue has been noted and our team will follow up shortly. Goodbye.';
+      await logTranscript(
+        [callSid, 'customer', speechResult],
+        [callSid, 'bot',      result.message],
+        [callSid, 'system',   'Call completed', { status: 'completed' }],
+      );
+      return twiml(say(result.message, lang) + say(wrapMsg, lang) + '<Hangup/>');
+    }
+
+    // Continue conversation
     const followUp = lang === 'hi' ? 'Beep ke baad jawab dein.' : 'Please respond after the beep.';
     const nextUrl  = buildActionUrl(base, {
       step: 'triage_response', lang, issue: issueType,
       triageState: result.nextState, callSid, webhookBase: base,
+      ...(newRetry > 0 ? { retry: String(newRetry) } : {}),
     });
 
     await logTranscript(
