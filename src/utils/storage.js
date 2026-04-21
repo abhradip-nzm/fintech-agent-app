@@ -180,6 +180,34 @@ const _syncSecretsToCloud = async () => {
   }
 };
 
+// ─── Voice call history (per-customer, localStorage only) ────────────────────
+const _vcKey = (customerId) => `agently_voice_history_${customerId}`;
+
+/**
+ * Read saved voice call sessions for a customer.
+ * Returns an array of { entries, startedAt } objects.
+ */
+export const readVoiceCallHistory = (customerId) => {
+  if (!customerId) return [];
+  try {
+    const raw = localStorage.getItem(_vcKey(customerId));
+    return raw ? JSON.parse(raw) : [];
+  } catch { return []; }
+};
+
+/**
+ * Append a new voice call session and persist it.
+ * Keeps the last 20 sessions per customer to avoid unbounded growth.
+ */
+export const appendVoiceCallSession = (customerId, session) => {
+  if (!customerId || !session) return;
+  try {
+    const existing = readVoiceCallHistory(customerId);
+    const updated  = [...existing, session].slice(-20);
+    localStorage.setItem(_vcKey(customerId), JSON.stringify(updated));
+  } catch { /* storage quota — silently skip */ }
+};
+
 // ─── Public API ───────────────────────────────────────────────────────────────
 
 /**
