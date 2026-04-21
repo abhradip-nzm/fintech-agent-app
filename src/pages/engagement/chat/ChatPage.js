@@ -7,7 +7,9 @@ import { processTriageMessage, getTriageOpener, getCustomerIssueType } from '../
 import { SUPPORTED_LANGUAGES } from '../../../utils/languages';
 import { playMessageTone, playAssignTone } from '../../../utils/sounds';
 import { STATUS_META } from '../../../data/agentsData';
-import { readIVRConfig } from '../../../utils/storage';
+import { readIVRConfig, readVoiceCallHistory, appendVoiceCallSession } from '../../../utils/storage';
+import { generateChatReply, generateChatOpener, GEMINI_ROUTE_PHRASE } from '../../../utils/geminiChat';
+import VoiceCallModal from '../../../components/VoiceCallModal';
 
 // ─── Message bubble ───────────────────────────────────────────────────────────
 const MessageBubble = ({ msg, onTranslate, translated, translating }) => {
@@ -193,6 +195,10 @@ const ChatPage = () => {
   const [polling,         setPolling]         = useState(false);
   const [showAgentPicker, setShowAgentPicker] = useState(false);
 
+  // ── ElevenLabs voice call state ───────────────────────────────────────────
+  const [showVoiceCall,    setShowVoiceCall]    = useState(false);
+  const [voiceCallHistory, setVoiceCallHistory] = useState(() => readVoiceCallHistory(customerId)); // persisted per customer
+
   // ── IVR state ─────────────────────────────────────────────────────────────
   const [ivrCallSid,       setIvrCallSid]       = useState(null);
   const [ivrStatus,        setIvrStatus]        = useState(null); // null | 'initiating' | 'in-progress' | 'completed' | 'failed'
@@ -212,6 +218,7 @@ const ChatPage = () => {
   const importedMsgIds   = useRef(new Set());
   const pollIntervalRef  = useRef(null);
   const prevMsgCountRef  = useRef(0);
+  const messagesRef      = useRef([]);  // always-current messages for async callbacks
 
   const customer     = getCustomerById(customerId);
   const messages     = getConversation(customerId);
@@ -223,8 +230,14 @@ const ChatPage = () => {
   const convoActive     = hasPastConvo || botInitiated || messages.length > 0;
   const issueType       = getCustomerIssueType(customer);
 
+  // ── Keep messagesRef current so async callbacks don't get stale closures ─────
+  useEffect(() => { messagesRef.current = messages; }, [messages]);
+
   // ── Auto-scroll ──────────────────────────────────────────────────────────────
-  useEffect(() => { messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' }); }, [messages, botTyping, ivrTranscript]);
+  useEffect(() => { messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' }); }, [messages, botTyping, ivrTranscript, voiceCallHistory]);
+
+  // ── Reload voice call history when navigating to a different customer ─────────
+  useEffect(() => { setVoiceCallHistory(readVoiceCallHistory(customerId)); }, [customerId]); // eslint-disable-line
 
   // ── Seed imported WA IDs ─────────────────────────────────────────────────────
   useEffect(() => { messages.forEach(m => { if (m.waId) importedMsgIds.current.add(m.waId); }); }, []); // eslint-disable-line
@@ -254,30 +267,68 @@ const ChatPage = () => {
 
   useEffect(() => () => clearInterval(pollIntervalRef.current), []);
 
-  // ── Triage: auto reply to customer message ───────────────────────────────────
-  const triggerTriageReply = useCallback((customerMsg) => {
+  // ── Triage / Gemini: auto reply to customer message ──────────────────────────
+  const triggerTriageReply = useCallback(async (customerMsg) => {
     const triageState = getTriageState(customerId);
     if (!triageState) return;
     if (triageState.state === 'terminal') return;
 
+    const geminiKey = readIVRConfig().geminiKey;
     setBotTyping(true);
-    setTimeout(() => {
-      setBotTyping(false);
-      const currentLang = triageState.language || 'en';
-      const result = processTriageMessage(triageState.issueType, triageState.state, customerMsg, { phone: customer?.phone }, currentLang);
-      if (result.message) {
-        sendMessage(customerId, result.message, 'ai_bot', 'Agently AI');
-        // Deliver to WhatsApp (best effort)
+
+    // ── Gemini path ─────────────────────────────────────────────────────────
+    if (geminiKey) {
+      try {
+        const reply = await generateChatReply(geminiKey, customer, messagesRef.current);
+        setBotTyping(false);
+        if (!reply) return;
+
+        sendMessage(customerId, reply, 'ai_bot', 'Agently AI');
         const ph = '+' + (customer?.phone || '').replace(/\D/g, '');
-        sendWhatsAppMessage(ph, formatBotMessage(result.message)).catch(() => {});
+        sendWhatsAppMessage(ph, formatBotMessage(reply)).catch(() => {});
+
+        // Detect human routing phrase
+        const isRouting = reply.toLowerCase().includes(GEMINI_ROUTE_PHRASE);
+        setTriageState(customerId, {
+          issueType: triageState.issueType,
+          state:     isRouting ? 'terminal' : 'gemini_active',
+          language:  triageState.language,
+        });
+        if (isRouting) {
+          // Show agent picker after a short delay
+          setTimeout(() => setShowAgentPicker(true), 1800);
+        }
+      } catch (err) {
+        setBotTyping(false);
+        console.warn('[Gemini] Falling back to triage:', err.message);
+        // Fall through to rule-based triage below
+        _runTriageFallback(triageState, customerMsg);
       }
-      setTriageState(customerId, {
-        issueType: triageState.issueType,
-        state: result.nextState,
-        language: result.lang !== undefined ? result.lang : currentLang,
-      });
+      return;
+    }
+
+    // ── Rule-based triage fallback ───────────────────────────────────────────
+    setTimeout(() => {
+      _runTriageFallback(triageState, customerMsg);
     }, 1600);
-  }, [customerId, customer, getTriageState, sendMessage, setTriageState]);
+  }, [customerId, customer, getTriageState, sendMessage, setTriageState]); // eslint-disable-line
+
+  // Helper — keeps the async path and the timeout path DRY
+  const _runTriageFallback = useCallback((triageState, customerMsg) => {
+    setBotTyping(false);
+    const currentLang = triageState.language || 'en';
+    const result = processTriageMessage(triageState.issueType, triageState.state, customerMsg, { phone: customer?.phone }, currentLang);
+    if (result.message) {
+      sendMessage(customerId, result.message, 'ai_bot', 'Agently AI');
+      const ph = '+' + (customer?.phone || '').replace(/\D/g, '');
+      sendWhatsAppMessage(ph, formatBotMessage(result.message)).catch(() => {});
+    }
+    setTriageState(customerId, {
+      issueType: triageState.issueType,
+      state:     result.nextState,
+      language:  result.lang !== undefined ? result.lang : currentLang,
+    });
+  }, [customerId, customer, sendMessage, setTriageState]); // eslint-disable-line
 
   // ── Fetch WA replies ─────────────────────────────────────────────────────────
   const doFetchReplies = useCallback(async (showToast = true) => {
@@ -318,10 +369,29 @@ const ChatPage = () => {
   const handleInitiateBot = async () => {
     if (!customer || initiating) return;
     setInitiating(true);
-    const { message, nextState } = getTriageOpener();
-
     setBotTyping(true);
-    await new Promise(r => setTimeout(r, 1800));
+
+    const geminiKey = readIVRConfig().geminiKey;
+    let message, nextState;
+
+    if (geminiKey) {
+      // Gemini-powered opener — warm, contextual, no language menu
+      try {
+        message   = await generateChatOpener(geminiKey, customer);
+        nextState = 'gemini_active';
+      } catch (err) {
+        console.warn('[Gemini] Opener failed, using triage:', err.message);
+      }
+    }
+
+    if (!message) {
+      // Rule-based fallback
+      const opener = getTriageOpener();
+      message   = opener.message;
+      nextState = opener.nextState;
+    }
+
+    await new Promise(r => setTimeout(r, 900)); // brief "typing" pause
     setBotTyping(false);
 
     sendMessage(customerId, message, 'ai_bot', 'Agently AI');
@@ -365,10 +435,12 @@ const ChatPage = () => {
     setTimeout(() => setWaStatus(null), 3000);
     setSending(false);
 
-    // If bot mode: also process through triage for an AI auto-follow-up
+    // If bot mode AND human sent a manual bot message: advance triage state
+    // (skip entirely in Gemini mode — Gemini responds to customer messages only)
     if (!isHumanMode) {
       const triageState = getTriageState(customerId);
-      if (triageState && triageState.state !== 'terminal') {
+      const isGeminiMode = triageState?.state === 'gemini_active';
+      if (!isGeminiMode && triageState && triageState.state !== 'terminal') {
         const currentLang = triageState.language || 'en';
         setBotTyping(true);
         setTimeout(() => {
@@ -710,6 +782,29 @@ const ChatPage = () => {
 
   return (
     <>
+      {/* ElevenLabs voice call modal */}
+      {showVoiceCall && (
+        <VoiceCallModal
+          customer={customer}
+          messages={messages}
+          onClose={() => setShowVoiceCall(false)}
+          onCallEnd={(transcript) => {
+            if (transcript && transcript.length > 0) {
+              const session = {
+                entries:   transcript,
+                startedAt: transcript[0]?.timestamp || new Date().toISOString(),
+              };
+              appendVoiceCallSession(customerId, session);
+              setVoiceCallHistory(readVoiceCallHistory(customerId));
+            }
+          }}
+          onRouteToAgent={() => {
+            setShowVoiceCall(false);
+            setShowAgentPicker(true);
+          }}
+        />
+      )}
+
       {/* Agent picker modal */}
       {showAgentPicker && (
         <AgentPickerModal
@@ -957,6 +1052,14 @@ const ChatPage = () => {
                 {downloading ? '⏳ Preparing…' : '⬇ Download'}
               </button>
 
+              {/* Voice Call button (ElevenLabs browser-based) */}
+              <button
+                onClick={() => setShowVoiceCall(true)}
+                disabled={showVoiceCall}
+                style={{ display: 'flex', alignItems: 'center', gap: 5, padding: '6px 12px', borderRadius: 8, fontSize: 11, fontWeight: 700, background: showVoiceCall ? '#d1fae5' : 'linear-gradient(135deg, #059669, #10b981)', color: showVoiceCall ? '#065f46' : '#fff', border: 'none', cursor: showVoiceCall ? 'not-allowed' : 'pointer', fontFamily: 'var(--font-body)', whiteSpace: 'nowrap', boxShadow: showVoiceCall ? 'none' : '0 2px 8px rgba(16,185,129,0.3)' }}>
+                🎙 Voice Call
+              </button>
+
               {/* IVR Call button */}
               <button
                 onClick={handleInitiateIVR}
@@ -1048,6 +1151,36 @@ const ChatPage = () => {
               </div>
             )}
 
+            {/* ElevenLabs voice call history — rendered after chat messages so it appears at bottom */}
+            {voiceCallHistory.map((session, si) => (
+              <div key={`vc_${si}`}>
+                <Separator label={`🎙 Voice Call · Agently AI · ${new Date(session.startedAt).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' })}`} />
+                {session.entries.map((entry, ei) => {
+                  const isAgent = entry.speaker === 'agent';
+                  return (
+                    <div key={ei} style={{ display: 'flex', flexDirection: isAgent ? 'row' : 'row-reverse', gap: 8, alignItems: 'flex-start', marginBottom: 10 }}>
+                      <div style={{ width: 26, height: 26, borderRadius: '50%', background: isAgent ? '#d1fae5' : '#dcfce7', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 12, flexShrink: 0, marginTop: 2 }}>
+                        {isAgent ? '🤖' : '🎙'}
+                      </div>
+                      <div style={{ maxWidth: '72%', display: 'flex', flexDirection: 'column', gap: 3, alignItems: isAgent ? 'flex-start' : 'flex-end' }}>
+                        <span style={{ fontSize: 9, fontWeight: 700, color: isAgent ? '#059669' : '#15803d' }}>
+                          {isAgent ? 'Agently AI (Voice)' : customer.name}
+                        </span>
+                        <div style={{ background: isAgent ? '#f0fdf4' : '#dcfce7', border: `1px solid ${isAgent ? '#bbf7d0' : '#86efac'}`, borderRadius: isAgent ? '16px 16px 16px 4px' : '16px 16px 4px 16px', padding: '8px 12px', fontSize: 13, color: 'var(--gray-800)', lineHeight: 1.5 }}>
+                          <p style={{ margin: 0 }}>{entry.text}</p>
+                        </div>
+                        <span style={{ fontSize: 9, color: 'var(--gray-400)' }}>
+                          {entry.timestamp ? new Date(entry.timestamp).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' }) : ''}
+                          {' · Voice'}
+                        </span>
+                      </div>
+                    </div>
+                  );
+                })}
+                <Separator label="— Voice Call Ended —" />
+              </div>
+            ))}
+
             {/* ── Initiate bot panel ── */}
             {!hasPastConvo && messages.length === 0 && !botTyping && !ivrCallSid && (
               <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '30px 24px', minHeight: '45%' }}>
@@ -1064,10 +1197,11 @@ const ChatPage = () => {
                       <p style={{ fontSize: 11, color: '#92400e', marginTop: 3, lineHeight: 1.4 }}>{openIssues[0].description}</p>
                     </div>
                   )}
-                  {/* 3-mode selector */}
-                  <div style={{ display: 'flex', gap: 6, marginBottom: 16, justifyContent: 'center' }}>
+                  {/* 4-mode selector */}
+                  <div style={{ display: 'flex', gap: 6, marginBottom: 16, justifyContent: 'center', flexWrap: 'wrap' }}>
                     {[
                       { key: 'bot',   icon: '🤖', label: 'AI Bot',      color: '#1e40af', bg: '#dbeafe', border: '#bfdbfe' },
+                      { key: 'voice', icon: '🎙', label: 'Voice Call',  color: '#065f46', bg: '#d1fae5', border: '#6ee7b7' },
                       { key: 'ivr',   icon: '📞', label: 'IVR Call',    color: '#b91c1c', bg: '#fee2e2', border: '#fca5a5' },
                       { key: 'human', icon: '👤', label: 'Human Agent', color: '#5b21b6', bg: '#ede9fe', border: '#ddd6fe' },
                     ].map(opt => (
@@ -1082,10 +1216,15 @@ const ChatPage = () => {
                     ))}
                   </div>
                   <button
-                    onClick={initMode === 'ivr' ? handleInitiateIVR : initMode === 'human' ? () => setShowAgentPicker(true) : handleInitiateBot}
+                    onClick={
+                      initMode === 'ivr'   ? handleInitiateIVR :
+                      initMode === 'human' ? () => setShowAgentPicker(true) :
+                      initMode === 'voice' ? () => setShowVoiceCall(true) :
+                      handleInitiateBot
+                    }
                     disabled={initiating || (initMode === 'ivr' && (ivrStatus === 'initiating' || ivrStatus === 'in-progress'))}
                     style={{ width: '100%', padding: '13px 20px', borderRadius: 12, fontSize: 14, fontWeight: 700,
-                      background: initiating ? '#e2e8f0' : initMode === 'ivr' ? 'linear-gradient(135deg,#dc2626,#b91c1c)' : initMode === 'human' ? 'linear-gradient(135deg,#7c3aed,#6d28d9)' : 'linear-gradient(135deg,#1e5fb5,#7c3aed)',
+                      background: initiating ? '#e2e8f0' : initMode === 'ivr' ? 'linear-gradient(135deg,#dc2626,#b91c1c)' : initMode === 'human' ? 'linear-gradient(135deg,#7c3aed,#6d28d9)' : initMode === 'voice' ? 'linear-gradient(135deg,#059669,#10b981)' : 'linear-gradient(135deg,#1e5fb5,#7c3aed)',
                       color: initiating ? '#94a3b8' : '#fff', border: 'none', cursor: initiating ? 'not-allowed' : 'pointer',
                       fontFamily: 'var(--font-body)', boxShadow: initiating ? 'none' : '0 4px 20px rgba(30,95,181,0.3)',
                       display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8 }}>
@@ -1095,6 +1234,8 @@ const ChatPage = () => {
                       <>📞 {ivrStatus === 'in-progress' ? 'Call In Progress' : 'Start IVR Call'}</>
                     ) : initMode === 'human' ? (
                       <>👤 Assign Human Agent</>
+                    ) : initMode === 'voice' ? (
+                      <>🎙 Start Voice Call</>
                     ) : (
                       <><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"><polygon points="5 3 19 12 5 21 5 3"/></svg>Initiate Bot Conversation</>
                     )}
